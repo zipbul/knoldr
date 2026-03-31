@@ -1295,12 +1295,12 @@ CREATE INDEX idx_kg_relation_target ON kg_relation(target_entity_id);
 1. Agent Card (GET /.well-known/agent-card.json)
    정적 JSON 반환. 인증 불필요.
 
-2. SendMessage (POST /a2a, method: "SendMessage")
+2. SendMessage (POST /a2a, method: "message/send")
    즉시 응답 skill: store, query, explore, feedback, audit
    요청 → params.message.parts[0].data에서 skill + input 추출 → 핸들러 → 응답
    응답: Message (agent role) + parts[0].data에 result JSON
 
-3. GetTask (POST /a2a, method: "GetTask")
+3. GetTask (POST /a2a, method: "tasks/get")
    비동기 skill: research
    research는 SendMessage로 시작 → Task(state: working) 반환
    GetTask로 상태 조회 → completed | failed | working
@@ -1455,7 +1455,7 @@ Application 에러:
 
 ### Operations
 
-**Message (즉시 응답, method: `SendMessage`):**
+**Message (즉시 응답, method: `message/send`):**
 
 | skill | input | output |
 |-------|-------|--------|
@@ -1465,7 +1465,7 @@ Application 에러:
 | `feedback` | `{ entryId, signal: 'positive' \| 'negative', reason? }` | `{ entryId, newAuthority }` |
 | `audit` | `{ domain? }` | `{ totalEntries, activeEntries, avgAuthority, ingestion: { last24h: { stored, duplicate, rejected } }, domainDistribution: { [domain]: count } }` |
 
-**Task (비동기, `SendMessage`로 시작 → `GetTask`로 조회):**
+**Task (비동기, `message/send`로 시작 → `tasks/get`로 조회):**
 
 | skill | input | output |
 |-------|-------|--------|

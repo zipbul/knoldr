@@ -8,5 +8,6 @@ export async function handleResearch(input: Record<string, unknown>) {
     topic,
     domain: input.domain as string | undefined,
     maxEntries: input.maxEntries as number | undefined,
+    includeYoutube: input.includeYoutube as boolean | undefined,
   });
 }

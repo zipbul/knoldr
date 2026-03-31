@@ -95,27 +95,32 @@ export function startServer() {
         }
       }
 
-      // Webhook endpoint
-      if (req.method === "POST" && path.startsWith("/webhook/")) {
-        const feedId = path.split("/webhook/")[1];
-        if (!feedId) return Response.json({ error: "Missing feed ID" }, { status: 400 });
-
-        const authToken = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
-        const body = (await req.json()) as { content: string; url?: string; sourceType?: string };
-
-        const { handleWebhook } = await import("../collect/feeds/webhook");
-        const result = await handleWebhook(feedId, body, authToken);
-
-        if (!result.ok) {
-          const status = result.error === "Unauthorized" ? 401 : result.error === "Feed not found" ? 404 : 400;
-          return Response.json(result, { status });
-        }
-        return Response.json(result);
-      }
 
       return new Response("Not Found", { status: 404 });
     },
   });
+
+  // Batch dedup job — hourly check, runs at UTC 03:00
+  setInterval(async () => {
+    if (new Date().getUTCHours() === 3) {
+      try {
+        const { batchDedup } = await import("../collect/batch-dedup");
+        await batchDedup();
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "batch dedup failed");
+      }
+    }
+  }, 60 * 60 * 1000);
+
+  // Retry queue processor — every 5 minutes
+  setInterval(async () => {
+    try {
+      const { processRetryQueue } = await import("../collect/retry");
+      await processRetryQueue();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "retry queue processing failed");
+    }
+  }, 5 * 60 * 1000);
 
   logger.info({ port, host }, "knoldr A2A server started");
   return server;

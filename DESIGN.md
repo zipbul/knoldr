@@ -508,17 +508,17 @@ cold storage:
 타임아웃: 최대 30분. 초과 시 중단, 다음 날 이어서.
 ```
 
-### Data Collection (외부 에이전트 역할)
+### Data Collection (프로젝트 스쿼드의 부산물)
 
 ```
 데이터 수집은 Knoldr의 책임이 아니다.
-외부 전문 수집 에이전트가 A2A store skill로 데이터를 적재한다.
+프로젝트 스쿼드가 작업 중 발견한 지식을 A2A store로 적재한다.
 
-  보안 에이전트 ──A2A store──→ Knoldr (CVE, 취약점)
-  뉴스 에이전트 ──A2A store──→ Knoldr (HN, Reddit, 블로그)
-  논문 에이전트 ──A2A store──→ Knoldr (arXiv, 논문)
-  릴리즈 에이전트 ──A2A store──→ Knoldr (GitHub, npm)
+  프로젝트 스쿼드 A: 보안 감사 중 → CVE 발견 → Knoldr store
+  프로젝트 스쿼드 B: 기술 조사 중 → 논문/릴리즈 정보 → Knoldr store
+  프로젝트 스쿼드 C: 개발 중 → 베스트 프랙티스 정리 → Knoldr store
 
+수집이 목적이 아니라 작업의 부산물로 지식이 축적된다.
 Knoldr는 들어오는 데이터를 적재(Ingestion Engine)만 한다.
 유일한 예외: research skill (아래 Research Pipeline 참조).
 ```

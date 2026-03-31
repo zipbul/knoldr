@@ -4,6 +4,7 @@ import { sql, eq, and, gte, inArray, type SQL } from "drizzle-orm";
 import { rank, type RawRow, type ScoredEntry, type ScoreBreakdown } from "./rank";
 import type { QueryInput, ExploreInput } from "../ingest/validate";
 import { logger } from "../observability/logger";
+import { searchTotal, searchLatency } from "../observability/metrics";
 
 export interface SearchResult {
   entries: ScoredEntry[];
@@ -16,6 +17,8 @@ export interface SearchResult {
  * Keyword search with pgroonga FTS, filters, freshness decay, authority ranking.
  */
 export async function search(input: QueryInput): Promise<SearchResult> {
+  const timer = searchLatency.startTimer();
+  searchTotal.inc();
   const conditions: SQL[] = [eq(entry.status, "active")];
 
   if (input.minAuthority !== undefined) {
@@ -102,6 +105,7 @@ export async function search(input: QueryInput): Promise<SearchResult> {
       ? encodeCursor(sliced.scores[lastIdx]!.final, sliced.entries[lastIdx]!.id)
       : undefined;
 
+  timer();
   logger.info({ query: input.query, resultCount: sliced.entries.length }, "search completed");
 
   return { ...sliced, nextCursor };

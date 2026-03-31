@@ -4,6 +4,7 @@ import { entry, feedbackLog } from "../db/schema";
 import { sql, eq, and, gt, count } from "drizzle-orm";
 import { decodeUlidTimestamp } from "../lib/ulid-utils";
 import { logger } from "../observability/logger";
+import { feedbackTotal } from "../observability/metrics";
 
 interface FeedbackResult {
   entryId: string;
@@ -83,6 +84,7 @@ export async function processFeedback(
     agentId,
   });
 
+  feedbackTotal.inc({ signal });
   logger.info({ entryId, signal, newAuthority, agentId }, "feedback processed");
 
   return { entryId, newAuthority };

@@ -13,13 +13,12 @@ import { logger } from "../observability/logger";
 
 type SkillHandler = (input: Record<string, unknown>) => Promise<unknown>;
 
-const SKILL_HANDLERS: Record<string, SkillHandler> = {
+const SYNC_HANDLERS: Record<string, SkillHandler> = {
   store: handleStore,
   query: handleQuery,
   explore: handleExplore,
   feedback: handleFeedback,
   audit: handleAudit,
-  research: handleResearch,
 };
 
 function makeMessage(data: Record<string, unknown>): Message {
@@ -38,7 +37,27 @@ export class KnoldrExecutor implements AgentExecutor {
     try {
       const { skill, input } = extractSkillRequest(userMessage.parts);
 
-      const handler = SKILL_HANDLERS[skill];
+      // Research: async (don't await, run in background)
+      if (skill === "research") {
+        logger.info({ skill, taskId }, "starting async research task");
+
+        // Run in background — eventBus.finished() called when done
+        handleResearch(input)
+          .then((result) => {
+            eventBus.publish(makeMessage(result as unknown as Record<string, unknown>));
+            eventBus.finished();
+          })
+          .catch((err) => {
+            eventBus.publish(makeMessage({ error: { code: -32603, message: (err as Error).message } }));
+            eventBus.finished();
+          });
+
+        // Return immediately — SDK keeps task in "working" state until finished()
+        return;
+      }
+
+      // Sync skills
+      const handler = SYNC_HANDLERS[skill];
       if (!handler) {
         eventBus.publish(makeMessage({ error: `Unknown skill: ${skill}` }));
         eventBus.finished();

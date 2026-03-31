@@ -7,6 +7,7 @@ import { isDuplicate } from "./dedup";
 import { calculateAuthority, getSourceTrust } from "../score/authority";
 import { enqueueRetry } from "../collect/retry";
 import { decodeUlidTimestamp } from "../lib/ulid-utils";
+import { ingestionTotal, ingestionLatency } from "../observability/metrics";
 import {
   type StoreInput,
   type Source,
@@ -28,6 +29,7 @@ export interface IngestResult {
  * Main ingestion engine. Accepts both raw (Mode 1) and structured (Mode 2) inputs.
  */
 export async function ingest(input: StoreInput): Promise<IngestResult[]> {
+  const timer = ingestionLatency.startTimer();
   const sources: Source[] = input.sources ?? [];
   const results: IngestResult[] = [];
 
@@ -86,6 +88,12 @@ export async function ingest(input: StoreInput): Promise<IngestResult[]> {
       logger.error({ error: errorMsg, title: decomposed.title }, "entry processing failed");
       results.push({ entryId: "", authority: 0, decayRate: 0, action: "rejected", reason: errorMsg });
     }
+  }
+
+  // Record metrics
+  timer();
+  for (const r of results) {
+    ingestionTotal.inc({ action: r.action });
   }
 
   return results;

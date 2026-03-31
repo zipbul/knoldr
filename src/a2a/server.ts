@@ -95,9 +95,22 @@ export function startServer() {
         }
       }
 
-      // Webhook endpoint (Phase 2: Collection Pipeline)
+      // Webhook endpoint
       if (req.method === "POST" && path.startsWith("/webhook/")) {
-        return Response.json({ error: "Webhook not yet implemented" }, { status: 501 });
+        const feedId = path.split("/webhook/")[1];
+        if (!feedId) return Response.json({ error: "Missing feed ID" }, { status: 400 });
+
+        const authToken = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+        const body = (await req.json()) as { content: string; url?: string; sourceType?: string };
+
+        const { handleWebhook } = await import("../collect/feeds/webhook");
+        const result = await handleWebhook(feedId, body, authToken);
+
+        if (!result.ok) {
+          const status = result.error === "Unauthorized" ? 401 : result.error === "Feed not found" ? 404 : 400;
+          return Response.json(result, { status });
+        }
+        return Response.json(result);
       }
 
       return new Response("Not Found", { status: 404 });

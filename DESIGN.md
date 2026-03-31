@@ -64,8 +64,9 @@ Authority Score      + factuality              + actionability
                        (임베딩 거리, $0)
 
 A2A Server
-Collection Pipeline
+Research Pipeline (Google Search + Playwright + YouTube)
 CLI
+데이터 수집: 외부 전문 에이전트 (A2A store)
 ```
 
 ---
@@ -203,7 +204,7 @@ Mode 1 — raw (원시 데이터, 기본):
   입력: { raw: string, sources?: Source[] }
   → 전체 파이프라인 (분해 → 분류 → 임베딩 → 중복 감지 → authority → 저장)
   → 여러 Entry 반환 가능
-  사용: Collection Pipeline, 범용 에이전트, CLI --raw/--file
+  사용: 외부 수집 에이전트, 범용 에이전트, CLI --raw/--file, Research Pipeline
 
 Mode 2 — structured (사전 구조화):
   입력: { entries: [{ title, content, domain[], tags[]?, language?, decayRate?, metadata? }], sources?: Source[] }
@@ -217,7 +218,7 @@ Mode 2 — structured (사전 구조화):
 **파이프라인:**
 
 ```
-데이터 수신 (A2A store / 수집기 / CLI)
+데이터 수신 (A2A store / CLI / Research Pipeline)
     │
     ▼
 0. 모드 판별 (raw vs structured)
@@ -507,92 +508,19 @@ cold storage:
 타임아웃: 최대 30분. 초과 시 중단, 다음 날 이어서.
 ```
 
-### Collection Pipeline
+### Data Collection (외부 에이전트 역할)
 
 ```
-수집 소스 (source_feed)
-    │
-    ▼
-Feed fetch (cron 스케줄 기반)
-    ├─ 실패 시: 지수 백오프 재시도 (1분, 5분, 30분). 3회 실패 시 스킵, 다음 스케줄까지 대기. 로그 기록.
-    ├─ Rate limit (429): 즉시 백오프, Retry-After 헤더 준수.
-    │
-    ▼
-URL 정규화 (tracking parameter 제거: utm_*, ref, etc.)
-    │
-    ▼
-URL hash 중복 검사 (ingest_log)
-    │ 신규만 (LLM 호출 전에 체크하여 비용 절약)
-    ▼
-Ingestion Engine으로 전달 (배치 처리: 최대 10개 동시)
-```
+데이터 수집은 Knoldr의 책임이 아니다.
+외부 전문 수집 에이전트가 A2A store skill로 데이터를 적재한다.
 
-수집 소스:
+  보안 에이전트 ──A2A store──→ Knoldr (CVE, 취약점)
+  뉴스 에이전트 ──A2A store──→ Knoldr (HN, Reddit, 블로그)
+  논문 에이전트 ──A2A store──→ Knoldr (arXiv, 논문)
+  릴리즈 에이전트 ──A2A store──→ Knoldr (GitHub, npm)
 
-| 소스 | 방식 | 스케줄 | 인증 | 비고 |
-|------|------|--------|------|------|
-| GitHub Releases Atom | RSS | 1일 | X | |
-| npm Registry API | REST | 1일 | X | |
-| OSV.dev | REST | 4시간 | X | |
-| 공식 블로그 RSS | RSS | 1일 | X | |
-| arXiv | Atom | 1일 | X | 매일 게시되므로 일간 수집 |
-| Hacker News | API | 6시간 | X | /topstories → 개별 /item 호출 필요 |
-| Reddit | API | 6시간 | OAuth | OAuth 토큰 필요, 100req/min 제한 |
-| Webhook | HTTP | 실시간 | Bearer token | |
-| A2A | A2A | 실시간 | A2A auth | |
-
-**피드별 추출 매핑 (Ingestion Engine에 Mode 1 raw로 전달):**
-
-```
-RSS/Atom (공식 블로그, arXiv):
-  추출: title + description/summary + link
-  → raw = "{title}\n\n{description}"
-  → sources = [{ url: link, sourceType: 피드의 source_feed.config.sourceType }]
-
-GitHub Releases Atom:
-  추출: repo name + tag_name + release body (markdown)
-  → raw = "{repo} {tag_name}\n\n{body}"
-  → sources = [{ url: release_html_url, sourceType: 'github_release' }]
-
-npm Registry:
-  endpoint: GET https://registry.npmjs.org/-/v1/search?text={keyword}&size=20
-  추적 대상: source_feed.config.keywords[]에 등록된 패키지/키워드
-  추출: name + version + description
-  변경 감지: 이전 fetch의 latest version과 비교, 변경 시에만 수집
-  → raw = "{name}@{version}\n\n{description}"
-  → sources = [{ url: "https://www.npmjs.com/package/{name}", sourceType: 'official_docs' }]
-
-OSV.dev:
-  endpoint: POST https://api.osv.dev/v1/query (ecosystem 기반)
-  추적 대상: source_feed.config.ecosystems[] (e.g., ["npm", "PyPI", "Go"])
-  추출: id + summary + details + affected[].package.name
-  → raw = "{id}: {summary}\n\n{details}\n\nAffected: {package_names}"
-  → sources = [{ url: "https://osv.dev/vulnerability/{id}", sourceType: 'cve_db' }]
-
-Hacker News:
-  GET https://hacker-news.firebaseio.com/v0/topstories.json → 상위 30개 ID
-  각 ID: GET /v0/item/{id}.json → title + url + score
-  score < 50 → 스킵 (노이즈 필터링)
-  url 있으면: Jina Reader로 본문 추출 (실패 시 title만 사용)
-  url 없으면 (Ask HN 등): title만 사용 (댓글은 수집하지 않음, 노이즈 과다)
-  → raw = "{title}\n\n{extracted_content_or_empty}"
-  → sources = [{ url: "https://news.ycombinator.com/item?id={id}", sourceType: 'community_forum' }]
-
-Reddit:
-  OAuth: client_credentials flow (source_feed.config에 client_id, client_secret 저장)
-  endpoint: GET /r/{subreddit}/hot.json?limit=25
-  추적 대상: source_feed.config.subreddits[]
-  추출: title + selftext (self post) 또는 url → Jina Reader (link post)
-  score < 100 → 스킵 (노이즈 필터링)
-  → raw = "{title}\n\n{selftext_or_extracted}"
-  → sources = [{ url: "https://reddit.com{permalink}", sourceType: 'community_forum' }]
-
-Webhook:
-  POST /webhook/{feed_id}
-  인증: Bearer token (source_feed.config.webhookToken과 대조)
-  body: { content: string, url?: string, sourceType?: string }
-  → raw = content
-  → sources = url 있으면 [{ url, sourceType: sourceType || 'unknown' }], 없으면 []
+Knoldr는 들어오는 데이터를 적재(Ingestion Engine)만 한다.
+유일한 예외: research skill (아래 Research Pipeline 참조).
 ```
 
 ### Error Handling
@@ -620,7 +548,7 @@ PostgreSQL 장애:
   knoldr_feedback_total       {signal=positive|negative}
   knoldr_entry_count          {status=draft|active}
   knoldr_api_health           {provider=llm|embedding, status=up|down}
-  knoldr_collection_fetch_total {source, status=success|error}
+  knoldr_research_total         {status=completed|partial}
 
 로깅:
   구조화된 JSON 로그. 레벨: error, warn, info, debug.
@@ -665,9 +593,9 @@ Knoldr와 외부 에이전트의 유일한 인터페이스는 A2A다.
   audit    → 시스템 통계 → 응답
 
 내부 (A2A 아님, 에이전트 접근 불가):
-  Collection Pipeline (cron) → Ingestion Engine → DB
   CLI (관리자)               → Ingestion Engine → DB
-  Batch Dedup Job (cron)     → DB
+  Batch Dedup Job (일 1회)   → DB
+  Retry Queue (5분 간격)     → Ingestion Engine → DB
 ```
 
 **에이전트 역할:**
@@ -806,7 +734,7 @@ GPT-4급 멀티모델 심의로 미묘한 자연어 추론(NLI) 판단 가능.
 
 ```
 ┌─ source_check(url, claim) ───────────────────────────────────┐
-│  출처 URL fetch (Jina Reader) → 텍스트 추출                   │
+│  출처 URL fetch (Playwright + Readability) → 텍스트 추출      │
 │  Pyreez가 "이 출처가 이 주장을 뒷받침하는가?" 판단             │
 │  결과: confirmed | not_found | contradicted | unreachable     │
 │                                                               │
@@ -817,7 +745,7 @@ GPT-4급 멀티모델 심의로 미묘한 자연어 추론(NLI) 판단 가능.
 └───────────────────────────────────────────────────────────────┘
 
 ┌─ web_search(claim) ──────────────────────────────────────────┐
-│  Claim → 검색 쿼리 변환 → Tavily/Exa API                     │
+│  Claim → 검색 쿼리 변환 → Google Custom Search API            │
 │  상위 5개 결과 fetch → Pyreez가 각각 대조                      │
 │  출처 독립성 검사 (같은 원본 퍼나른 것은 1개로 카운트)          │
 │  결과: { independent_supporting: N, contradicting: N }        │
@@ -873,13 +801,13 @@ Pyreez 멀티모델 심의가 각 단계 결과를 종합하여 최종 판정.
 ```
 per claim:
   Pyreez: 패키지 설치, deliberation engine 직접 호출 (GPT-4급 모델 3-5개 심의)
-  source_check: Jina Reader (무료 1000/일)
-  web_search: Tavily (유료, 일일 예산)
+  source_check: Playwright + Readability (자체 호스팅)
+  web_search: Google Custom Search API ($5/1K queries)
   db_cross_ref: DB 검색 (무료)
 
 일일 예산:
   web_search: 하루 최대 500회
-  Jina Reader: 하루 최대 1000회
+  Playwright: 자체 호스팅, 한도 없음
   초과 시: verdict = unverified, 다음 날 재시도
 
 우선순위:
@@ -1040,10 +968,10 @@ CREATE TABLE source_feed (
 );
 
 -- 수집 이력 (중복 방지 + 감사)
--- PK는 ULID. url_hash는 Collection Pipeline 중복 방지용 (nullable, A2A store는 URL 없을 수 있음).
+-- PK는 ULID. url_hash는 Research Pipeline URL 중복 방지용 (nullable).
 CREATE TABLE ingest_log (
   id TEXT PRIMARY KEY,
-  url_hash TEXT,               -- nullable. Collection Pipeline만 사용.
+  url_hash TEXT,               -- nullable. Research Pipeline URL 중복 방지.
   source_feed_id TEXT REFERENCES source_feed(id),
   entry_id TEXT,
   entry_created_at TIMESTAMPTZ, -- ULID에서 파생. action='rejected'이면 NULL.
@@ -1211,7 +1139,7 @@ CREATE INDEX idx_kg_relation_target ON kg_relation(target_entity_id);
 │  │  └───────────┘  └─────────────────────┘   │   │
 │  │                                           │   │
 │  │  ┌───────────┐  ┌─────────────────────┐   │   │
-│  │  │ Collector │  │  Retry Queue        │   │   │
+│  │  │ Research  │  │  Retry Queue        │   │   │
 │  │  │ + 백오프   │  │  (API 장애)  │   │   │
 │  │  └───────────┘  └─────────────────────┘   │   │
 │  └───────────────────────────────────────────┘   │
@@ -1327,7 +1255,6 @@ GetExtendedAgentCard  → 모든 skill이 공개, 확장 카드 불필요
 //   GET /.well-known/agent-card.json → 정적 JSON
 //   GET /health                     → health check
 //   GET /metrics                    → Prometheus metrics
-//   POST /webhook/:feedId           → Collection Pipeline webhook
 //
 // src/a2a/dispatcher.ts — AgentExecutor 구현 (SDK의 A2ARequestHandler 인터페이스)
 //
@@ -1500,7 +1427,7 @@ limit: 기본 10, 최대 50.
 ### Research Pipeline (비동기 Task)
 
 ```
-research 요청: { topic, domain?, maxEntries? (기본 30, 최대 50) }
+research 요청: { topic, domain?, maxEntries? (기본 30, 최대 50), includeYoutube? (기본 true) }
     │
     ▼
 1. LLM이 topic에서 검색 쿼리 3-5개 생성 [Cloud LLM 호출]
@@ -1508,34 +1435,38 @@ research 요청: { topic, domain?, maxEntries? (기본 30, 최대 50) }
     응답: tool_use로 { queries: string[] } 반환
     │
     ▼
-2. 각 쿼리로 Tavily Search API 호출
-    POST https://api.tavily.com/search
-    { query, search_depth: "advanced", max_results: 10, include_raw_content: true }
+2. 각 쿼리로 Google Custom Search API 호출
+    GET https://www.googleapis.com/customsearch/v1?key=$KEY&cx=$CSE_ID&q={query}&num=10
     쿼리당 상위 10개 URL 수집 (중복 URL 제거)
     │
     ▼
-3. Tavily raw_content가 충분하면 그대로 사용.
-    raw_content가 없거나 빈약한 URL → Jina Reader로 본문 추출.
-    Jina Reader: GET https://r.jina.ai/{url} (Authorization: Bearer $KNOLDR_JINA_API_KEY)
-    Jina 실패 시: 해당 URL 스킵 (직접 fetch는 하지 않음 — JS 렌더링 불가, 품질 불안정)
+3. 본문 추출 (Playwright + @mozilla/readability, 직접 구현)
+    Playwright (Chromium headless): JS 렌더링 처리. 15초 타임아웃.
+    @mozilla/readability: HTML에서 본문만 추출 (Firefox 리더뷰 엔진).
+    추출 실패 또는 본문 < 100자 → 해당 URL 스킵.
     │
     ▼
-4. 추출된 텍스트를 Ingestion Engine Mode 1 (raw)으로 전달
+4. YouTube 검색 + 자막 추출 (includeYoutube=true일 때)
+    YouTube Data API로 검색 (videoCaption=closedCaption, 자막 있는 영상만).
+    쿼리당 상위 3개 영상의 자막 추출.
+    자막 추출: YouTube innertube API → captionTracks → 자막 XML 파싱.
+    자막 없으면 스킵. (멀티모달 폴백은 v0.3 이후 검토)
+    │
+    ▼
+5. 추출된 텍스트를 Ingestion Engine Mode 1 (raw)으로 전달
     원자적 분해 → 메타데이터 분류 → 중복 감지 → Authority → 저장
-    sources = [{ url, sourceType: Tavily score 기반 추정 }]
+    sources = [{ url, sourceType: URL 패턴 기반 추정 }]
     │
     ▼
-5. 진행 상황을 A2A task status로 보고
+6. 진행 상황을 A2A task status로 보고
     완료 시: status='completed', 저장된 entries 반환
-    예산 초과/타임아웃 시: status='partial', 처리된 것까지 반환
+    타임아웃 시: status='partial', 처리된 것까지 반환
 
 제한:
   - 타임아웃: 5분
-  - Tavily: 일일 최대 1000 search (v0.3 Claim 검증과 공유)
-  - Jina Reader: 일일 최대 1000 fetch (v0.3 Claim 검증과 공유)
-  - research 예약 몫: 일일 한도의 50% (500 search, 500 fetch). 나머지는 v0.3 Claim 검증용.
-  - 예산 초과 시 즉시 partial 반환, 에러 코드 1005. 다음 날 재시도 없음 (명시적 재요청 필요).
-  - 일일 사용량은 메모리 카운터로 추적 (UTC 0시 리셋). 정확한 과금은 Tavily 대시보드에서 확인.
+  - Google Custom Search: 하루 100회 무료, 초과 시 $5/1,000 쿼리
+  - YouTube Data API: 일일 10,000 unit 쿼터 (search=100 units, 실질 100회/일)
+  - 타임아웃 또는 API 한도 초과 시 즉시 partial 반환, 에러 코드 1005.
 ```
 
 ---
@@ -1577,18 +1508,9 @@ knoldr/
 │   │   ├── search.ts                # pgroonga FTS 검색
 │   │   └── rank.ts                  # pgroonga_score 정규화 + authority + freshness 랭킹
 │   ├── collect/
-│   │   ├── scheduler.ts             # cron 스케줄러 + 파티션 자동 생성
-│   │   ├── retry.ts                 # retry_queue 프로세서
-│   │   ├── feeds/
-│   │   │   ├── rss.ts
-│   │   │   ├── github-release.ts
-│   │   │   ├── npm-registry.ts
-│   │   │   ├── osv.ts
-│   │   │   ├── arxiv.ts
-│   │   │   ├── hackernews.ts
-│   │   │   ├── reddit.ts           # OAuth 인증 포함
-│   │   │   └── webhook.ts
-│   │   └── research.ts
+│   │   ├── research.ts              # Research Pipeline (Google Search + Playwright + YouTube)
+│   │   ├── retry.ts                 # retry_queue 프로세서 (적재 실패 복구)
+│   │   └── batch-dedup.ts           # 일일 중복 정리 (cosine > 0.95)
 │   ├── observability/
 │   │   ├── metrics.ts               # Prometheus 메트릭
 │   │   ├── health.ts                # GET /health
@@ -1618,7 +1540,9 @@ knoldr/
 | Ingestion LLM | Cloud API (Claude Haiku 등) | 분해/분류 품질 우선. ~$3/day. |
 | A2A | @a2a-js/sdk (타입 + server 코어) + Bun.serve() | SDK가 타입 + JSON-RPC 파싱/라우팅 제공. Express 불필요 (optional peer dep). HTTP 레이어만 Bun-native. |
 | Verification | pyreez (설치형) | 멀티모델 심의, deliberation engine 직접 호출 (v0.3) |
-| Collection | 내장 RSS/API 파서 | 의존성 최소화 |
+| Web Search | Google Custom Search API | 가장 정확한 검색 결과. $5/1K queries. |
+| Content Extraction | Playwright + @mozilla/readability | JS 렌더링 + 본문 추출. 자체 호스팅. |
+| Video Transcript | YouTube Data API + 자막 파싱 | 영상 콘텐츠 텍스트화. |
 | Observability | prom-client + pino | Prometheus 메트릭 + 구조화 로그 |
 
 ### ORM 제약 (Drizzle)
@@ -1658,21 +1582,21 @@ knoldr/
 | `KNOLDR_EMBEDDING_API_KEY` | O | - | Embedding API key (OpenAI 호환) |
 | `KNOLDR_EMBEDDING_MODEL` | X | `text-embedding-3-small` | Embedding 모델 |
 | `KNOLDR_EMBEDDING_BASE_URL` | X | `https://api.openai.com/v1` | Embedding API base URL |
-| `KNOLDR_TAVILY_API_KEY` | X | - | Tavily Search API key (research 스킬용) |
-| `KNOLDR_JINA_API_KEY` | X | - | Jina Reader API key (research + collection용) |
+| `KNOLDR_GOOGLE_API_KEY` | X | - | Google Custom Search API key (research 스킬용) |
+| `KNOLDR_GOOGLE_CSE_ID` | X | - | Google Custom Search Engine ID |
+| `KNOLDR_YOUTUBE_API_KEY` | X | - | YouTube Data API key (research 영상 검색용) |
 | `KNOLDR_PORT` | X | `3000` | 서버 포트 |
 | `KNOLDR_HOST` | X | `0.0.0.0` | 서버 바인드 주소 |
 | `KNOLDR_LOG_LEVEL` | X | `info` | 로그 레벨 (`error`, `warn`, `info`, `debug`) |
 
-`KNOLDR_TAVILY_API_KEY`: research 스킬 + v0.3 Claim 검증에 필요. 미설정 시 research 호출 → 에러 코드 -32603.
-`KNOLDR_JINA_API_KEY`: research 스킬 + Collection Pipeline (HN, Reddit link post) + v0.3 Claim 검증에 필요.
-  미설정 시: research → 에러 코드 -32603. Collection Pipeline → Jina Reader 스킵, raw = title만 사용.
+`KNOLDR_GOOGLE_API_KEY` + `KNOLDR_GOOGLE_CSE_ID`: research 스킬에 필요. 미설정 시 research 호출 → 에러 코드 -32603.
+`KNOLDR_YOUTUBE_API_KEY`: research 영상 검색용. 미설정 시 YouTube 검색 스킵 (웹 검색만 수행).
 
 ### CLI Specification
 
 ```
 knoldr serve [options]
-  A2A 서버 + Collection cron + Batch Dedup Job 시작.
+  A2A 서버 + Batch Dedup Job + Retry Queue 시작.
   --port <number>        서버 포트 (기본: 3000, 환경변수: KNOLDR_PORT)
   --host <string>        바인드 주소 (기본: 0.0.0.0, 환경변수: KNOLDR_HOST)
 
@@ -1768,17 +1692,15 @@ Load tests:
 - CLI (store, query, explore)
 - retry_queue 프로세서
 
-### Phase 2: A2A Server + Collection + Observability
-- A2A 서버 (Bearer token 인증, 모든 Message/Task handler)
+### Phase 2: A2A Server + Research + Observability
+- A2A 서버 (Bearer token 인증, @a2a-js/sdk + Bun.serve())
 - Feedback loop (atomic SQL, rate limit, feedback_log)
-- Research pipeline (web search → Ingestion Engine 재사용)
-- RSS/Atom, GitHub, npm, OSV, arXiv 수집기
-- HN, Reddit (OAuth), Webhook 수집기
-- cron 스케줄러 + 파티션 자동 생성
+- Research pipeline (Google Custom Search + Playwright + Readability + YouTube 자막)
 - Batch dedup job (일 1회, 동시성 race condition 정리)
 - 에러 핸들링 (지수 백오프, retry_queue)
 - Prometheus 메트릭, 구조화 로그, health check
-- Testing suite (unit + integration + quality golden set)
+- 데이터 수집은 외부 전문 에이전트가 A2A store로 수행
+- Testing suite (unit + integration + e2e)
 
 ### Phase 3: Claim Layer (v0.3)
 - claim, verify_queue, entry_score 테이블 추가 (Entry 변경 없음)

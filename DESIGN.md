@@ -189,7 +189,7 @@ decayRate 가이드:
 ### Ingestion Pipeline (핵심 엔진)
 
 AI가 데이터를 적재할 때의 품질이 전체 시스템의 품질을 결정한다.
-Ingestion LLM: Cloud API (Claude Haiku 등). 로컬 LLM 대비 분해/분류 품질이 압도적.
+Ingestion LLM: Codex CLI (GPT-4.1 mini) subprocess 호출. 구독제로 비용 효율적.
 
 v0.2는 내용의 사실 여부를 검증하지 않는다. 사실 검증은 v0.3(Claim + Pyreez)에서 수행.
 v0.2의 Ingestion은: 구조화 + 메타데이터 분류 + 중복 제거 + 출처 기반 authority.
@@ -272,8 +272,9 @@ factuality 스코어가 추가되면 비로소 "검증됨" 표기 가능.
 
 Ingestion 파이프라인 Step 2의 LLM 호출 상세.
 
-**모델:** Cloud LLM (환경변수 `KNOLDR_LLM_MODEL`, 기본 `claude-haiku-4-5-20251001`)
-**호출 방식:** Anthropic Messages API. `tool_use`로 구조화된 JSON 응답 강제.
+**분해 모델:** Codex CLI (GPT-4.1 mini). IFEval 85.4%, Structured Outputs 100% JSON 보장.
+**리서치 모델:** Gemini CLI (Gemini 2.0 Flash). 1M 컨텍스트, 최저가.
+**호출 방식:** CLI subprocess 호출 (`-p` 프롬프트 플래그 + `--output-format json`). 구독제 커버.
 
 **LLM 응답 스키마 (tool의 input_schema로 정의):**
 
@@ -348,15 +349,15 @@ content 앞 500자를 보내고 language만 반환받음 (비용 최소화).
 **비용 모델 (v0.2 기준):**
 ```
 per entry:
-  LLM 호출 x1 (decompose + classify): Cloud API ~$0.001
-  Embedding x1: Cloud API ~$0.01 (평균 500 tokens/entry × $0.02/M = $0.00001. 실제로는 무시할 수준)
+  Decompose (Codex CLI, GPT-4.1 mini): 구독제 커버. API 과금 시 ~$0.001/entry.
+  Embedding x1: Cloud API ~$0.00001 (평균 500 tokens/entry × $0.02/M. 무시할 수준)
   DB writes: 무시할 수준
 
 daily estimate (1000 raw items, 평균 3 entries/item = 3000 entries):
-  LLM: ~$3/day (3000 × ~$0.001)
-  Embedding: ~$0.03/day (3000 × 500 tokens avg = 1.5M tokens × $0.02/M)
-  총: ~$3/day
-  GPU: 불필요
+  Decompose: 구독제 → $0/day. API 과금 시 ~$3/day.
+  Embedding: ~$0.03/day
+  Research (Gemini CLI): 구독제 → $0/day. API 과금 시 ~$0.63/day.
+  총: 구독제 기준 ~$0.03/day (embedding만). GPU: 불필요.
 ```
 
 ### Search Pipeline
@@ -546,8 +547,6 @@ PostgreSQL 장애:
   knoldr_search_total
   knoldr_search_latency_ms
   knoldr_feedback_total       {signal=positive|negative}
-  knoldr_entry_count          {status=draft|active}
-  knoldr_api_health           {provider=llm|embedding, status=up|down}
   knoldr_research_total         {status=completed|partial}
 
 로깅:
@@ -556,15 +555,14 @@ PostgreSQL 장애:
   모든 검색 쿼리 로깅 (query, filters, result_count, latency).
 
 health check endpoint:
-  GET /health → { db: up|down, llmApi: up|down, embeddingApi: up|down, uptime, entryCount }
+  GET /health → { db: up|down, llmApi: up|down|unconfigured, embeddingApi: up|down|unconfigured, uptime, entryCount, latencyMs }
 ```
 
 ### Security
 
 ```
 인증:
-  A2A endpoint: Bearer token (환경변수 KNOLDR_API_TOKEN).
-  Webhook: 별도 Bearer token (source_feed.config에 저장).
+  A2A endpoint: Bearer token (환경변수 KNOLDR_API_TOKEN). 미설정 시 open access.
 
 입력 검증:
   title: 최대 500자, HTML 태그 strip.
@@ -955,7 +953,7 @@ CREATE TABLE entry_source (
   FOREIGN KEY (entry_id, entry_created_at) REFERENCES entry(id, created_at) ON DELETE CASCADE
 );
 
--- 수집 소스 관리
+-- 수집 소스 관리 (v0.2에서 미사용. 외부 수집 에이전트 도입 시 활용 예정)
 CREATE TABLE source_feed (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -1171,9 +1169,14 @@ CREATE INDEX idx_kg_relation_target ON kg_relation(target_entity_id);
 
 ```json
 {
+  "protocolVersion": "0.3.0",
   "name": "knoldr",
   "description": "AI-native universal data platform. Stores, scores, and retrieves any type of data with near-zero hallucination.",
+  "url": "http://localhost:3000",
   "version": "0.2.0",
+  "capabilities": { "streaming": false, "pushNotifications": false },
+  "defaultInputModes": ["application/json"],
+  "defaultOutputModes": ["application/json"],
   "skills": [
     {
       "id": "store",
@@ -1482,7 +1485,6 @@ knoldr/
 │   │   ├── dispatcher.ts            # JSON-RPC 2.0 디스패처 (SendMessage, GetTask 라우팅)
 │   │   ├── agent-card.ts            # GET /.well-known/agent-card.json
 │   │   ├── auth.ts                  # Bearer token 인증 미들웨어
-│   │   ├── task-store.ts            # 메모리 Map<taskId, Task> (research 태스크 관리)
 │   │   ├── handlers/
 │   │   │   ├── store.ts
 │   │   │   ├── query.ts
@@ -1490,7 +1492,9 @@ knoldr/
 │   │   │   ├── feedback.ts
 │   │   │   ├── audit.ts
 │   │   │   └── research.ts          # Task 생성 → 백그라운드 실행 → GetTask로 조회
-│   │   └── types.ts                 # A2A spec 타입 (Message, Part, Task, TaskState 등)
+│   │   └── types.ts                 # A2A skill 요청 추출
+│   ├── lib/
+│   │   └── ulid-utils.ts            # ULID 타임스탬프 디코딩
 │   ├── db/
 │   │   ├── schema.ts                # drizzle-orm 스키마 (PostgreSQL)
 │   │   ├── migrate.ts               # drizzle-kit 마이그레이션
@@ -1537,7 +1541,9 @@ knoldr/
 | ORM | drizzle-orm | 타입 세이프, PostgreSQL 지원. raw SQL 최소화. |
 | DB Driver | postgres (porsager) | Bun 호환, 고성능 |
 | Migration | drizzle-kit | drizzle-orm 통합 |
-| Ingestion LLM | Cloud API (Claude Haiku 등) | 분해/분류 품질 우선. ~$3/day. |
+| Decompose LLM | Codex CLI (GPT-4.1 mini) | 지시 준수 + 구조화 출력 최고 품질/비용비. 구독제. |
+| Research LLM | Gemini CLI (Gemini 2.0 Flash) | 1M 컨텍스트, $0.63/day. 구독제. |
+| DOM Parser | linkedom + @mozilla/readability | Playwright 추출 HTML의 본문 파싱 |
 | A2A | @a2a-js/sdk (타입 + server 코어) + Bun.serve() | SDK가 타입 + JSON-RPC 파싱/라우팅 제공. Express 불필요 (optional peer dep). HTTP 레이어만 Bun-native. |
 | Verification | pyreez (설치형) | 멀티모델 심의, deliberation engine 직접 호출 (v0.3) |
 | Web Search | Google Custom Search API | 가장 정확한 검색 결과. $5/1K queries. |
@@ -1575,10 +1581,9 @@ knoldr/
 | 변수 | 필수 | 기본값 | 설명 |
 |------|:----:|--------|------|
 | `DATABASE_URL` | O | - | PostgreSQL 연결 문자열 (e.g., `postgres://user:pass@host:5432/knoldr`) |
-| `KNOLDR_API_TOKEN` | O | - | A2A + Webhook Bearer token 인증 |
-| `KNOLDR_LLM_API_KEY` | O | - | Ingestion LLM API key (Anthropic) |
-| `KNOLDR_LLM_MODEL` | X | `claude-haiku-4-5-20251001` | Ingestion LLM 모델 |
-| `KNOLDR_LLM_BASE_URL` | X | `https://api.anthropic.com` | LLM API base URL |
+| `KNOLDR_API_TOKEN` | X | - | A2A Bearer token 인증. 미설정 시 open access. |
+| `KNOLDR_CODEX_CLI` | X | `codex` | Codex CLI 실행 경로 (분해용) |
+| `KNOLDR_GEMINI_CLI` | X | `gemini` | Gemini CLI 실행 경로 (리서치용) |
 | `KNOLDR_EMBEDDING_API_KEY` | O | - | Embedding API key (OpenAI 호환) |
 | `KNOLDR_EMBEDDING_MODEL` | X | `text-embedding-3-small` | Embedding 모델 |
 | `KNOLDR_EMBEDDING_BASE_URL` | X | `https://api.openai.com/v1` | Embedding API base URL |
@@ -1609,7 +1614,7 @@ knoldr store [options]
     cat data.txt | knoldr store --file - stdin에서 읽기
 
   Mode 2 (structured):
-    knoldr store --json ./entries.json   구조화된 JSON 파일
+    knoldr store --input ./entries.json  구조화된 JSON 파일
     JSON 형식: { "entries": [{ "title", "content", "domain"[], ... }], "sources"?: [] }
 
   공통 옵션:

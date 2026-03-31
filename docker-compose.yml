@@ -1,0 +1,41 @@
+services:
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    ports:
+      - "${KNOLDR_DB_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: knoldr
+      POSTGRES_PASSWORD: knoldr
+      POSTGRES_DB: knoldr
+    volumes:
+      - knoldr-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knoldr"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  db-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    ports:
+      - "${KNOLDR_TEST_DB_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: knoldr
+      POSTGRES_PASSWORD: knoldr
+      POSTGRES_DB: knoldr_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knoldr"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    profiles:
+      - test
+
+volumes:
+  knoldr-data:

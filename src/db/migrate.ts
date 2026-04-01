@@ -146,6 +146,30 @@ async function migrate() {
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_retry_queue_next ON retry_queue(next_retry_at) WHERE attempts < 3`;
 
+  // ============================================================
+  // crawl_domain (Deep Crawl Engine)
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS crawl_domain (
+      domain TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL DEFAULT 'unknown',
+      trust DOUBLE PRECISION NOT NULL DEFAULT 0.1 CHECK (trust >= 0 AND trust <= 1),
+      blocked BOOLEAN NOT NULL DEFAULT false,
+      block_reason TEXT,
+      rate_limit_ms INTEGER NOT NULL DEFAULT 2000,
+      robots_txt TEXT,
+      robots_fetched_at TIMESTAMPTZ,
+      config JSONB,
+      total_crawled INTEGER NOT NULL DEFAULT 0,
+      total_success INTEGER NOT NULL DEFAULT 0,
+      last_crawled_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_crawl_domain_blocked ON crawl_domain(blocked)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_crawl_domain_source_type ON crawl_domain(source_type)`;
+
   logger.info("migrations complete");
   await sql.end();
 }

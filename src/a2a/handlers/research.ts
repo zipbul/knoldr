@@ -8,8 +8,10 @@ export async function handleResearch(input: Record<string, unknown>) {
   const result = await research({
     topic,
     domain: input.domain as string | undefined,
-    maxEntries: input.maxEntries as number | undefined,
-    includeYoutube: input.includeYoutube as boolean | undefined,
+    maxUrls: input.maxUrls as number | undefined,
+    contentTypes: input.contentTypes as string[] | undefined,
+    maxDepth: input.maxDepth as number | undefined,
+    focusDomains: input.focusDomains as string[] | undefined,
   });
 
   researchTotal.inc({ status: result.status });

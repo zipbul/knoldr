@@ -116,6 +116,25 @@ export async function setupTestDb() {
     )
   `;
 
+  await sql`
+    CREATE TABLE IF NOT EXISTS crawl_domain (
+      domain TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL DEFAULT 'unknown',
+      trust DOUBLE PRECISION NOT NULL DEFAULT 0.1,
+      blocked BOOLEAN NOT NULL DEFAULT false,
+      block_reason TEXT,
+      rate_limit_ms INTEGER NOT NULL DEFAULT 2000,
+      robots_txt TEXT,
+      robots_fetched_at TIMESTAMPTZ,
+      config JSONB,
+      total_crawled INTEGER NOT NULL DEFAULT 0,
+      total_success INTEGER NOT NULL DEFAULT 0,
+      last_crawled_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+
   // pgroonga index
   await sql`CREATE INDEX IF NOT EXISTS idx_entry_fulltext ON entry USING pgroonga(title, content)`;
 }
@@ -129,6 +148,7 @@ export async function cleanTestDb() {
   await sql`DELETE FROM entry_tag`;
   await sql`DELETE FROM entry_domain`;
   await sql`DELETE FROM retry_queue`;
+  await sql`DELETE FROM crawl_domain`;
   await sql`DELETE FROM entry`;
 }
 

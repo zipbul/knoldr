@@ -3,6 +3,7 @@ import {
   text,
   doublePrecision,
   timestamp,
+  boolean,
   jsonb,
   integer,
   index,
@@ -180,6 +181,34 @@ export const feedbackLog = pgTable(
     check("feedback_log_signal_values", sql`${t.signal} IN ('positive', 'negative')`),
     index("idx_feedback_log_entry").on(t.entryId, t.createdAt),
     index("idx_feedback_log_agent_entry").on(t.agentId, t.entryId, t.createdAt),
+  ],
+);
+
+// ============================================================
+// crawl_domain — Domain crawling policy (Deep Crawl Engine)
+// ============================================================
+export const crawlDomain = pgTable(
+  "crawl_domain",
+  {
+    domain: text("domain").primaryKey(),
+    sourceType: text("source_type").notNull().default("unknown"),
+    trust: doublePrecision("trust").notNull().default(0.1),
+    blocked: boolean("blocked").notNull().default(false),
+    blockReason: text("block_reason"),
+    rateLimitMs: integer("rate_limit_ms").notNull().default(2000),
+    robotsTxt: text("robots_txt"),
+    robotsFetchedAt: timestamp("robots_fetched_at", { withTimezone: true }),
+    config: jsonb("config"),
+    totalCrawled: integer("total_crawled").notNull().default(0),
+    totalSuccess: integer("total_success").notNull().default(0),
+    lastCrawledAt: timestamp("last_crawled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("crawl_domain_trust_range", sql`${t.trust} >= 0 AND ${t.trust} <= 1`),
+    index("idx_crawl_domain_blocked").on(t.blocked),
+    index("idx_crawl_domain_source_type").on(t.sourceType),
   ],
 );
 

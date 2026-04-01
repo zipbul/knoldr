@@ -1,295 +1,76 @@
+import { decomposeQuery } from "./query-decompose";
+import { crawl } from "./crawler";
+import { searchAndExtractYoutube } from "./extract-youtube";
 import { ingest } from "../ingest/engine";
 import { parseStoreInput } from "../ingest/validate";
 import { logger } from "../observability/logger";
 
-const GEMINI_CLI = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
-
-interface ResearchInput {
+export interface ResearchInput {
   topic: string;
   domain?: string;
-  maxEntries?: number;
-  includeYoutube?: boolean;
+  maxUrls?: number;
+  contentTypes?: string[];
+  maxDepth?: number;
+  focusDomains?: string[];
 }
 
 export interface ResearchResult {
   entries: Array<{ entryId: string; action: string }>;
+  urlsCrawled: number;
   status: "completed" | "partial";
 }
 
-// ============================================================
-// 1. LLM Query Generation (Gemini CLI subprocess)
-// ============================================================
-async function generateQueries(topic: string): Promise<string[]> {
-  const queryPrompt = `Generate 3-5 diverse search queries to research: ${topic}
+const DEFAULT_CONTENT_TYPES = ["html", "pdf", "image", "youtube"];
+const TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
-Respond with JSON only. Schema:
-{ "queries": ["string"] }`;
-  const cliParts = GEMINI_CLI.split(/\s+/);
-
-  const proc = Bun.spawn([...cliParts, "-p", queryPrompt, "--output-format", "json"], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env },
-  });
-
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    throw new Error(`Gemini CLI exited with code ${exitCode}: ${stderr}`);
-  }
-
-  try {
-    const json = JSON.parse(stdout) as { queries?: string[] };
-    return json.queries ?? [`${topic} overview`, `${topic} latest`];
-  } catch {
-    throw new Error(`Gemini CLI returned invalid JSON: ${stdout.slice(0, 500)}`);
-  }
-}
-
-// ============================================================
-// 2. Google Custom Search
-// ============================================================
-interface GoogleSearchResult {
-  title: string;
-  link: string;
-  snippet: string;
-}
-
-async function googleSearch(query: string): Promise<GoogleSearchResult[]> {
-  const googleApiKey = process.env.KNOLDR_GOOGLE_API_KEY;
-  const googleCseId = process.env.KNOLDR_GOOGLE_CSE_ID;
-  if (!googleApiKey || !googleCseId) {
-    throw new Error("KNOLDR_GOOGLE_API_KEY and KNOLDR_GOOGLE_CSE_ID required for research");
-  }
-
-  const params = new URLSearchParams({
-    key: googleApiKey,
-    cx: googleCseId,
-    q: query,
-    num: "10",
-  });
-
-  const res = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
-  if (!res.ok) throw new Error(`Google Search API error ${res.status}: ${await res.text()}`);
-
-  const json = (await res.json()) as {
-    items?: Array<{ title: string; link: string; snippet: string }>;
-  };
-
-  return (json.items ?? []).map((item) => ({
-    title: item.title,
-    link: item.link,
-    snippet: item.snippet,
-  }));
-}
-
-// ============================================================
-// 3. Content Extraction (Playwright + Readability)
-// ============================================================
-async function extractContent(url: string): Promise<string | null> {
-  try {
-    const { chromium } = await import("playwright");
-    const { Readability } = await import("@mozilla/readability");
-    const { parseHTML } = await import("linkedom");
-
-    const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-    // Wait for dynamic content
-    await page.waitForTimeout(2000);
-
-    const html = await page.content();
-    await browser.close();
-
-    // Extract article content with Readability
-    const { document } = parseHTML(html);
-    const reader = new Readability(document);
-    const article = reader.parse();
-
-    if (!article?.textContent || article.textContent.length < 100) {
-      return null;
-    }
-
-    return article.textContent.trim();
-  } catch (err) {
-    logger.debug({ url, error: (err as Error).message }, "content extraction failed");
-    return null;
-  }
-}
-
-// ============================================================
-// 4. YouTube Search + Transcript
-// ============================================================
-interface YouTubeResult {
-  videoId: string;
-  title: string;
-  transcript: string;
-}
-
-async function youtubeSearch(query: string, maxResults = 5): Promise<YouTubeResult[]> {
-  const youtubeApiKey = process.env.KNOLDR_YOUTUBE_API_KEY;
-  if (!youtubeApiKey) return [];
-
-  // Search videos
-  const searchParams = new URLSearchParams({
-    key: youtubeApiKey,
-    q: query,
-    type: "video",
-    part: "snippet",
-    maxResults: String(maxResults),
-    videoCaption: "closedCaption", // only videos with captions
-  });
-
-  const searchRes = await fetch(
-    `https://www.googleapis.com/youtube/v3/search?${searchParams}`,
-  );
-  if (!searchRes.ok) return [];
-
-  const searchJson = (await searchRes.json()) as {
-    items?: Array<{ id: { videoId: string }; snippet: { title: string } }>;
-  };
-
-  const results: YouTubeResult[] = [];
-
-  for (const item of searchJson.items ?? []) {
-    const videoId = item.id.videoId;
-    const title = item.snippet.title;
-
-    // Fetch transcript
-    const transcript = await fetchYoutubeTranscript(videoId);
-    if (transcript) {
-      results.push({ videoId, title, transcript });
-    }
-  }
-
-  return results;
-}
-
-async function fetchYoutubeTranscript(videoId: string): Promise<string | null> {
-  try {
-    // YouTube transcript via innertube API (no OAuth needed)
-    const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
-    if (!res.ok) return null;
-
-    const html = await res.text();
-
-    // Extract captions URL from page source
-    const captionsMatch = html.match(/"captionTracks":\[(.+?)\]/);
-    if (!captionsMatch) return null;
-
-    const captionsJson = JSON.parse(`[${captionsMatch[1]}]`) as Array<{
-      baseUrl: string;
-      languageCode: string;
-    }>;
-
-    // Prefer English, fallback to first available
-    const track =
-      captionsJson.find((c) => c.languageCode === "en") ?? captionsJson[0];
-    if (!track?.baseUrl) return null;
-
-    // Fetch transcript XML
-    const transcriptRes = await fetch(track.baseUrl);
-    if (!transcriptRes.ok) return null;
-
-    const transcriptXml = await transcriptRes.text();
-
-    // Extract text from <text> tags
-    const texts = transcriptXml.match(/<text[^>]*>([\s\S]*?)<\/text>/g);
-    if (!texts) return null;
-
-    return texts
-      .map((t) =>
-        t
-          .replace(/<[^>]*>/g, "")
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/&#39;/g, "'")
-          .replace(/&quot;/g, '"'),
-      )
-      .join(" ")
-      .trim();
-  } catch {
-    return null;
-  }
-}
-
-// ============================================================
-// 5. Research Orchestration
-// ============================================================
+/**
+ * Deep Crawl Engine orchestrator.
+ * 1. Query decomposition (Gemini CLI)
+ * 2. Seed URL collection (Google CSE)
+ * 3. Deep crawling (Playwright + extractors)
+ * 4. YouTube search (parallel)
+ */
 export async function research(input: ResearchInput): Promise<ResearchResult> {
-  const maxEntries = Math.min(input.maxEntries ?? 30, 50);
-  const deadline = Date.now() + 5 * 60 * 1000; // 5 min timeout
-  const allResults: Array<{ entryId: string; action: string }> = [];
-  const seenUrls = new Set<string>();
+  const maxUrls = Math.min(input.maxUrls ?? 50, 200);
+  const contentTypes = new Set(input.contentTypes ?? DEFAULT_CONTENT_TYPES);
+  const maxDepth = Math.min(input.maxDepth ?? 2, 5);
+  const deadline = Date.now() + TIMEOUT_MS;
 
-  logger.info({ topic: input.topic, maxEntries }, "research started");
+  logger.info({ topic: input.topic, maxUrls, maxDepth, contentTypes: [...contentTypes] }, "Deep Crawl Engine started");
 
-  // Step 1: Generate queries
-  let queries: string[];
-  try {
-    queries = await generateQueries(input.topic);
-  } catch (err) {
-    logger.error({ error: (err as Error).message }, "failed to generate research queries");
-    return { entries: [], status: "partial" };
+  // Step 1: Query Decomposition
+  const subQueries = await decomposeQuery(input.topic);
+  logger.info({ queryCount: subQueries.length, queries: subQueries.map((q) => q.main) }, "queries decomposed");
+
+  // Step 2: Seed URL collection via Google CSE
+  const seedUrls = await collectSeedUrls(subQueries, input.focusDomains);
+  logger.info({ seedCount: seedUrls.length }, "seed URLs collected");
+
+  if (seedUrls.length === 0) {
+    return { entries: [], urlsCrawled: 0, status: "partial" };
   }
 
-  logger.info({ queries }, "research queries generated");
+  // Step 3: Deep crawling
+  const crawlResult = await crawl(seedUrls, {
+    topic: input.topic,
+    maxUrls,
+    contentTypes,
+    maxDepth,
+    focusDomains: input.focusDomains ?? [],
+  }, deadline);
 
-  // Step 2: Web search + content extraction
-  for (const query of queries) {
-    if (Date.now() > deadline || allResults.length >= maxEntries) break;
+  // Step 4: YouTube search (if enabled and budget remaining)
+  if (contentTypes.has("youtube") && Date.now() < deadline) {
+    const ytBudget = Math.min(2, subQueries.length);
+    for (let i = 0; i < ytBudget && Date.now() < deadline; i++) {
+      const query = subQueries[i]?.main;
+      if (!query) break;
 
-    let searchResults: GoogleSearchResult[];
-    try {
-      searchResults = await googleSearch(query);
-    } catch (err) {
-      logger.warn({ query, error: (err as Error).message }, "google search failed");
-      continue;
-    }
-
-    for (const result of searchResults) {
-      if (Date.now() > deadline || allResults.length >= maxEntries) break;
-      if (seenUrls.has(result.link)) continue;
-      seenUrls.add(result.link);
-
-      // Extract content via Playwright + Readability
-      const content = await extractContent(result.link);
-      if (!content || content.length < 100) continue;
-
-      const raw = `${result.title}\n\n${content}`;
-      const sourceType = estimateSourceType(result.link);
-
-      try {
-        const storeInput = parseStoreInput({
-          raw: raw.slice(0, 200_000),
-          sources: [{ url: result.link, sourceType }],
-        });
-        const ingestResults = await ingest(storeInput);
-        for (const r of ingestResults) {
-          allResults.push({ entryId: r.entryId, action: r.action });
-        }
-      } catch (err) {
-        logger.warn({ url: result.link, error: (err as Error).message }, "ingestion failed");
-      }
-    }
-  }
-
-  // Step 3: YouTube search + transcript (if enabled)
-  if (input.includeYoutube !== false && Date.now() < deadline && allResults.length < maxEntries) {
-    for (const query of queries.slice(0, 2)) {
-      if (Date.now() > deadline || allResults.length >= maxEntries) break;
-
-      const videos = await youtubeSearch(query, 3);
+      const videos = await searchAndExtractYoutube(query, 3);
       for (const video of videos) {
-        if (Date.now() > deadline || allResults.length >= maxEntries) break;
+        if (Date.now() > deadline) break;
 
-        const raw = `${video.title}\n\n${video.transcript}`;
+        const raw = `${video.title}\n\n${video.text}`;
         const url = `https://www.youtube.com/watch?v=${video.videoId}`;
 
         try {
@@ -299,26 +80,95 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
           });
           const ingestResults = await ingest(storeInput);
           for (const r of ingestResults) {
-            allResults.push({ entryId: r.entryId, action: r.action });
+            crawlResult.entries.push({ entryId: r.entryId, action: r.action });
           }
         } catch (err) {
-          logger.warn({ videoId: video.videoId, error: (err as Error).message }, "youtube ingestion failed");
+          logger.warn({ videoId: video.videoId, error: (err as Error).message }, "YouTube ingestion failed");
         }
       }
     }
   }
 
   const status = Date.now() > deadline ? "partial" : "completed";
-  logger.info({ topic: input.topic, resultCount: allResults.length, status }, "research finished");
+  logger.info({
+    topic: input.topic,
+    urlsCrawled: crawlResult.urlsCrawled,
+    entriesStored: crawlResult.entries.filter((e) => e.action === "stored").length,
+    status,
+  }, "Deep Crawl Engine finished");
 
-  return { entries: allResults, status };
+  return {
+    entries: crawlResult.entries,
+    urlsCrawled: crawlResult.urlsCrawled,
+    status,
+  };
 }
 
-function estimateSourceType(url: string): string {
-  if (url.includes("github.com")) return "github_release";
-  if (url.includes("arxiv.org")) return "research_paper";
-  if (url.includes(".gov") || url.includes(".edu")) return "official_docs";
-  if (url.includes("medium.com") || url.includes("dev.to")) return "established_blog";
-  if (url.includes("stackoverflow.com") || url.includes("reddit.com")) return "community_forum";
-  return "unknown";
+async function collectSeedUrls(
+  subQueries: Array<{ main: string; expansions: string[] }>,
+  focusDomains?: string[],
+): Promise<string[]> {
+  const googleApiKey = process.env.KNOLDR_GOOGLE_API_KEY;
+  const googleCseId = process.env.KNOLDR_GOOGLE_CSE_ID;
+  if (!googleApiKey || !googleCseId) {
+    throw new Error("KNOLDR_GOOGLE_API_KEY and KNOLDR_GOOGLE_CSE_ID required for research");
+  }
+
+  const allUrls = new Set<string>();
+
+  // Collect all queries: main + expansions
+  const queries: string[] = [];
+  for (const sq of subQueries) {
+    queries.push(sq.main);
+    for (const exp of sq.expansions) {
+      queries.push(exp);
+    }
+  }
+
+  for (const query of queries) {
+    try {
+      const params = new URLSearchParams({
+        key: googleApiKey,
+        cx: googleCseId,
+        q: query,
+        num: "10",
+      });
+
+      const res = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`, {
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) continue;
+
+      const json = (await res.json()) as {
+        items?: Array<{ link: string }>;
+      };
+
+      for (const item of json.items ?? []) {
+        allUrls.add(item.link);
+      }
+    } catch (err) {
+      logger.warn({ query, error: (err as Error).message }, "CSE query failed");
+    }
+  }
+
+  // Prioritize focus domains
+  if (focusDomains && focusDomains.length > 0) {
+    const focused: string[] = [];
+    const rest: string[] = [];
+    for (const url of allUrls) {
+      try {
+        const hostname = new URL(url).hostname;
+        if (focusDomains.some((d) => hostname === d || hostname.endsWith(`.${d}`))) {
+          focused.push(url);
+        } else {
+          rest.push(url);
+        }
+      } catch {
+        rest.push(url);
+      }
+    }
+    return [...focused, ...rest];
+  }
+
+  return [...allUrls];
 }

@@ -2,16 +2,7 @@ import { ingest } from "../ingest/engine";
 import { parseStoreInput } from "../ingest/validate";
 import { logger } from "../observability/logger";
 
-function getResearchConfig() {
-  return {
-    googleApiKey: process.env.KNOLDR_GOOGLE_API_KEY,
-    googleCseId: process.env.KNOLDR_GOOGLE_CSE_ID,
-    youtubeApiKey: process.env.KNOLDR_YOUTUBE_API_KEY,
-    llmApiKey: process.env.KNOLDR_LLM_API_KEY,
-    llmBaseUrl: process.env.KNOLDR_LLM_BASE_URL ?? "https://api.anthropic.com",
-    llmModel: process.env.KNOLDR_LLM_MODEL ?? "claude-haiku-4-5-20251001",
-  };
-}
+const GEMINI_CLI = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
 
 interface ResearchInput {
   topic: string;
@@ -26,57 +17,37 @@ export interface ResearchResult {
 }
 
 // ============================================================
-// 1. LLM Query Generation
+// 1. LLM Query Generation (Gemini CLI subprocess)
 // ============================================================
 async function generateQueries(topic: string): Promise<string[]> {
-  const { llmApiKey, llmBaseUrl, llmModel } = getResearchConfig();
-  if (!llmApiKey) throw new Error("KNOLDR_LLM_API_KEY required for research");
+  const queryPrompt = `Generate 3-5 diverse search queries to research: ${topic}
 
-  const res = await fetch(`${llmBaseUrl}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": llmApiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: llmModel,
-      max_tokens: 512,
-      tools: [
-        {
-          name: "search_queries",
-          description: "Generate diverse search queries for research",
-          input_schema: {
-            type: "object",
-            properties: {
-              queries: {
-                type: "array",
-                items: { type: "string" },
-                minItems: 3,
-                maxItems: 5,
-              },
-            },
-            required: ["queries"],
-          },
-        },
-      ],
-      tool_choice: { type: "tool", name: "search_queries" },
-      messages: [
-        {
-          role: "user",
-          content: `Generate 3-5 diverse search queries to research: ${topic}`,
-        },
-      ],
-    }),
+Respond with JSON only. Schema:
+{ "queries": ["string"] }`;
+  const cliParts = GEMINI_CLI.split(/\s+/);
+
+  const proc = Bun.spawn([...cliParts, "-p", queryPrompt, "--output-format", "json"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env },
   });
 
-  if (!res.ok) throw new Error(`LLM API error ${res.status}: ${await res.text()}`);
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
 
-  const json = (await res.json()) as {
-    content: Array<{ type: string; name?: string; input?: { queries?: string[] } }>;
-  };
-  const toolUse = json.content.find((b) => b.type === "tool_use" && b.name === "search_queries");
-  return toolUse?.input?.queries ?? [`${topic} overview`, `${topic} latest`];
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(`Gemini CLI exited with code ${exitCode}: ${stderr}`);
+  }
+
+  try {
+    const json = JSON.parse(stdout) as { queries?: string[] };
+    return json.queries ?? [`${topic} overview`, `${topic} latest`];
+  } catch {
+    throw new Error(`Gemini CLI returned invalid JSON: ${stdout.slice(0, 500)}`);
+  }
 }
 
 // ============================================================
@@ -89,7 +60,8 @@ interface GoogleSearchResult {
 }
 
 async function googleSearch(query: string): Promise<GoogleSearchResult[]> {
-  const { googleApiKey, googleCseId } = getResearchConfig();
+  const googleApiKey = process.env.KNOLDR_GOOGLE_API_KEY;
+  const googleCseId = process.env.KNOLDR_GOOGLE_CSE_ID;
   if (!googleApiKey || !googleCseId) {
     throw new Error("KNOLDR_GOOGLE_API_KEY and KNOLDR_GOOGLE_CSE_ID required for research");
   }
@@ -160,7 +132,7 @@ interface YouTubeResult {
 }
 
 async function youtubeSearch(query: string, maxResults = 5): Promise<YouTubeResult[]> {
-  const { youtubeApiKey } = getResearchConfig();
+  const youtubeApiKey = process.env.KNOLDR_YOUTUBE_API_KEY;
   if (!youtubeApiKey) return [];
 
   // Search videos

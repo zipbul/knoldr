@@ -333,7 +333,7 @@ Rules:
 **응답 검증:**
 
 ```
-1. tool_use 응답에서 JSON 추출
+1. CLI stdout JSON 파싱 (--output-format json)
 2. Zod 스키마로 파싱 (위 JSON Schema 대응)
 3. 파싱 실패 시:
    → 1차: 동일 LLM에 에러 메시지 포함하여 재요청 (최대 1회)
@@ -953,24 +953,11 @@ CREATE TABLE entry_source (
   FOREIGN KEY (entry_id, entry_created_at) REFERENCES entry(id, created_at) ON DELETE CASCADE
 );
 
--- 수집 소스 관리 (v0.2에서 미사용. 외부 수집 에이전트 도입 시 활용 예정)
-CREATE TABLE source_feed (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  url TEXT NOT NULL,
-  feed_type TEXT NOT NULL,
-  schedule TEXT NOT NULL,        -- cron expression (e.g. "0 */4 * * *")
-  config JSONB,                 -- feed별 설정 (OAuth token 등)
-  last_fetched_at TIMESTAMPTZ,
-  enabled BOOLEAN NOT NULL DEFAULT true
-);
-
 -- 수집 이력 (중복 방지 + 감사)
 -- PK는 ULID. url_hash는 Research Pipeline URL 중복 방지용 (nullable).
 CREATE TABLE ingest_log (
   id TEXT PRIMARY KEY,
   url_hash TEXT,               -- nullable. Research Pipeline URL 중복 방지.
-  source_feed_id TEXT REFERENCES source_feed(id),
   entry_id TEXT,
   entry_created_at TIMESTAMPTZ, -- ULID에서 파생. action='rejected'이면 NULL.
   action TEXT NOT NULL CHECK (action IN ('stored', 'duplicate', 'rejected')),
@@ -995,7 +982,6 @@ CREATE TABLE retry_queue (
   id TEXT PRIMARY KEY,
   raw_content TEXT NOT NULL,
   source_url TEXT,
-  source_feed_id TEXT REFERENCES source_feed(id),
   error_reason TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1138,7 +1124,7 @@ CREATE INDEX idx_kg_relation_target ON kg_relation(target_entity_id);
 │  │                                           │   │
 │  │  ┌───────────┐  ┌─────────────────────┐   │   │
 │  │  │ Research  │  │  Retry Queue        │   │   │
-│  │  │ + 백오프   │  │  (API 장애)  │   │   │
+│  │  │           │  │  (API 장애 복구)    │   │   │
 │  │  └───────────┘  └─────────────────────┘   │   │
 │  └───────────────────────────────────────────┘   │
 │                                                  │
@@ -1261,7 +1247,7 @@ GetExtendedAgentCard  → 모든 skill이 공개, 확장 카드 불필요
 //
 // src/a2a/dispatcher.ts — AgentExecutor 구현 (SDK의 A2ARequestHandler 인터페이스)
 //
-// SDK의 DefaultRequestHandler가 JSON-RPC 파싱 + SendMessage/GetTask 라우팅 처리.
+// SDK의 DefaultRequestHandler가 JSON-RPC 파싱 + message/send, tasks/get 라우팅 처리.
 // AgentExecutor가 skill별 핸들러로 위임:
 //   skill="store"    → handlers/store.ts
 //   skill="query"    → handlers/query.ts
@@ -1279,7 +1265,7 @@ GetExtendedAgentCard  → 모든 skill이 공개, 확장 카드 불필요
 {
   "jsonrpc": "2.0",
   "id": "req-001",
-  "method": "SendMessage",
+  "method": "message/send",
   "params": {
     "message": {
       "role": "user",
@@ -1368,15 +1354,15 @@ research 태스크 수명: 완료 후 1시간 보관, 이후 자동 삭제.
 **에러 코드:**
 
 ```
-JSON-RPC 표���:
+JSON-RPC 표준:
   -32700  Parse error (잘못된 JSON)
   -32600  Invalid request (필수 필드 누락)
   -32601  Method not found (잘못된 method)
-  -32602  Invalid params (파라미터 검증 실���)
+  -32602  Invalid params (파라미터 검증 실패)
   -32603  Internal error (서버 내부 오류)
 
 Application 에러:
-  1001  Validation error (입력 크기/형식 검�� 실패, data에 상세 사유)
+  1001  Validation error (입력 크기/형식 검증 실패, data에 상세 사유)
   1002  Duplicate detected (모든 entries가 중복)
   1003  Rate limited (feedback rate limit 초과)
   1004  Unauthorized (Bearer token 불일치/누락)
@@ -1390,8 +1376,8 @@ Application 에러:
 | skill | input | output |
 |-------|-------|--------|
 | `store` | Mode 1: `{ raw, sources? }` / Mode 2: `{ entries[{ title, content, domain[], tags[]?, language?, decayRate?, metadata? }], sources? }` | `{ entries: [{ entryId, authority, decayRate, action }] }` |
-| `query` | `{ query: string, domain?, tags?, language?, minAuthority?, minTrustLevel?, includeClaims?, limit?, cursor? }` | `{ entries: Entry[], scores: { relevance, authority, freshness, factuality?, final }[], trustLevels: string[], claims?: Claim[][], nextCursor? }` |
-| `explore` | `{ domain?, tags?, minAuthority?, minTrustLevel?, sortBy?, limit?, cursor? }` | `{ entries: Entry[], scores: { authority, freshness, factuality?, final }[], trustLevels: string[], nextCursor? }` |
+| `query` | `{ query: string, domain?, tags?, language?, minAuthority?, minTrustLevel?, includeClaims?, limit?, cursor? }` | `{ results: [{ entry: Entry, scores: { relevance, authority, freshness, factuality?, final }, trustLevel: string, claims?: Claim[] }], nextCursor? }` |
+| `explore` | `{ domain?, tags?, minAuthority?, minTrustLevel?, sortBy?, limit?, cursor? }` | `{ results: [{ entry: Entry, scores: { authority, freshness, factuality?, final }, trustLevel: string }], nextCursor? }` |
 | `feedback` | `{ entryId, signal: 'positive' \| 'negative', reason? }` | `{ entryId, newAuthority }` |
 | `audit` | `{ domain? }` | `{ totalEntries, activeEntries, avgAuthority, ingestion: { last24h: { stored, duplicate, rejected } }, domainDistribution: { [domain]: count } }` |
 

@@ -81,23 +81,9 @@ export async function setupTestDb() {
   `;
 
   await sql`
-    CREATE TABLE IF NOT EXISTS source_feed (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      url TEXT NOT NULL,
-      feed_type TEXT NOT NULL,
-      schedule TEXT NOT NULL,
-      config JSONB,
-      last_fetched_at TIMESTAMPTZ,
-      enabled BOOLEAN NOT NULL DEFAULT true
-    )
-  `;
-
-  await sql`
     CREATE TABLE IF NOT EXISTS ingest_log (
       id TEXT PRIMARY KEY,
       url_hash TEXT,
-      source_feed_id TEXT,
       entry_id TEXT,
       entry_created_at TIMESTAMPTZ,
       action TEXT NOT NULL,
@@ -123,7 +109,6 @@ export async function setupTestDb() {
       id TEXT PRIMARY KEY,
       raw_content TEXT NOT NULL,
       source_url TEXT,
-      source_feed_id TEXT,
       error_reason TEXT,
       attempts INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

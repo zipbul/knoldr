@@ -1,7 +1,9 @@
 /**
  * Mock external API servers for testing.
- * Mocks: Anthropic LLM API, OpenAI Embedding API.
+ * Mocks: OpenAI Embedding API (HTTP server).
+ * LLM mocking: via KNOLDR_CODEX_CLI env pointing to mock-codex.ts script.
  */
+import { join } from "path";
 
 interface MockEmbeddingResponse {
   data: Array<{ embedding: number[]; index: number }>;
@@ -25,14 +27,6 @@ export function similarEmbedding(base: number[], similarity: number): number[] {
 }
 
 let embeddingServer: ReturnType<typeof Bun.serve> | null = null;
-let llmServer: ReturnType<typeof Bun.serve> | null = null;
-
-// Track custom handlers for per-test overrides
-let llmHandler: ((body: unknown) => unknown) | null = null;
-
-export function setLlmHandler(handler: ((body: unknown) => unknown) | null) {
-  llmHandler = handler;
-}
 
 /** Start mock embedding API server */
 export function startMockEmbeddingServer(port = 19876) {
@@ -57,57 +51,25 @@ export function startMockEmbeddingServer(port = 19876) {
   return embeddingServer;
 }
 
-/** Start mock LLM API server (Anthropic Messages API) */
-export function startMockLlmServer(port = 19877) {
-  llmServer = Bun.serve({
-    port,
-    fetch(req) {
-      if (req.method === "POST" && new URL(req.url).pathname === "/v1/messages") {
-        return req.json().then((body: unknown) => {
-          if (llmHandler) {
-            return Response.json(llmHandler(body));
-          }
-
-          // Default: return a single decomposed entry
-          return Response.json({
-            content: [
-              {
-                type: "tool_use",
-                id: "call_1",
-                name: "store_entries",
-                input: {
-                  entries: [
-                    {
-                      title: "Test Entry",
-                      content: "This is test content from LLM decomposition.",
-                      domain: ["testing"],
-                      tags: ["unit-test"],
-                      language: "en",
-                      decayRate: 0.01,
-                    },
-                  ],
-                },
-              },
-            ],
-            stop_reason: "tool_use",
-          });
-        });
-      }
-      return new Response("Not Found", { status: 404 });
-    },
-  });
-  return llmServer;
-}
-
 /** Stop all mock servers */
 export function stopMockServers() {
   if (embeddingServer) {
     embeddingServer.stop();
     embeddingServer = null;
   }
-  if (llmServer) {
-    llmServer.stop();
-    llmServer = null;
+}
+
+/** Path to mock Codex CLI script */
+export const MOCK_CODEX_CLI = `bun ${join(__dirname, "mock-codex.ts")}`;
+
+/**
+ * Set mock Codex CLI handler mode via env var.
+ * Modes: "default", "multi", "empty", "fail", "bad-json", "language:XX"
+ */
+export function setCodexHandler(mode: string | null) {
+  if (mode) {
+    process.env.MOCK_CODEX_HANDLER = mode;
+  } else {
+    delete process.env.MOCK_CODEX_HANDLER;
   }
-  llmHandler = null;
 }

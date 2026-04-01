@@ -54,11 +54,11 @@ export const apiHealth = new Gauge({
   registers: [register],
 });
 
-// Collection metrics
-export const collectionFetchTotal = new Counter({
-  name: "knoldr_collection_fetch_total",
-  help: "Total collection fetch operations",
-  labelNames: ["source", "status"] as const,
+// Research metrics
+export const researchTotal = new Counter({
+  name: "knoldr_research_total",
+  help: "Total research operations",
+  labelNames: ["status"] as const,
   registers: [register],
 });
 

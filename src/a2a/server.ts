@@ -100,9 +100,14 @@ export function startServer() {
     },
   });
 
-  // Batch dedup job — hourly check, runs at UTC 03:00
+  // Batch dedup job — daily at UTC 03:00
+  // Track last run date to avoid missing if not polled exactly at hour 3
+  let lastDedupDate = "";
   setInterval(async () => {
-    if (new Date().getUTCHours() === 3) {
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    if (now.getUTCHours() >= 3 && lastDedupDate !== todayStr) {
+      lastDedupDate = todayStr;
       try {
         const { batchDedup } = await import("../collect/batch-dedup");
         await batchDedup();
@@ -110,7 +115,7 @@ export function startServer() {
         logger.error({ error: (err as Error).message }, "batch dedup failed");
       }
     }
-  }, 60 * 60 * 1000);
+  }, 10 * 60 * 1000); // check every 10 minutes
 
   // Retry queue processor — every 5 minutes
   setInterval(async () => {

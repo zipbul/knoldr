@@ -56,7 +56,6 @@ export async function ingest(input: StoreInput): Promise<IngestResult[]> {
       await enqueueRetry(
         input.raw,
         sources[0]?.url,
-        undefined,
         `decompose_parse_error: ${errorMsg}`,
       );
 

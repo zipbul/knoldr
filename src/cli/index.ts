@@ -46,13 +46,33 @@ async function main() {
       await handleAudit(commandArgs);
       break;
     case "serve":
-      console.log("serve: not yet implemented (Phase 2)");
+      await handleServe(commandArgs);
       break;
     default:
       console.error(`Unknown command: ${command}`);
       console.log(HELP);
       process.exit(1);
   }
+}
+
+async function handleServe(args: string[]) {
+  const { values } = parseArgs({
+    args,
+    options: {
+      port: { type: "string" },
+      host: { type: "string" },
+    },
+    allowPositionals: false,
+  });
+
+  if (values.port) process.env.KNOLDR_PORT = values.port;
+  if (values.host) process.env.KNOLDR_HOST = values.host;
+
+  const { startServer } = await import("../a2a/server");
+  startServer();
+
+  // Keep process alive — server runs indefinitely
+  await new Promise(() => {});
 }
 
 async function handleStore(args: string[]) {

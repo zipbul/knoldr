@@ -66,14 +66,12 @@ export async function processRetryQueue(): Promise<number> {
 export async function enqueueRetry(
   rawContent: string,
   sourceUrl: string | undefined,
-  sourceFeedId: string | undefined,
   errorReason: string,
 ): Promise<void> {
   await db.insert(retryQueue).values({
     id: ulid(),
     rawContent,
     sourceUrl: sourceUrl ?? null,
-    sourceFeedId: sourceFeedId ?? null,
     errorReason,
   });
   logger.info({ errorReason }, "added to retry queue");

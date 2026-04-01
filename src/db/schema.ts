@@ -3,7 +3,6 @@ import {
   text,
   doublePrecision,
   timestamp,
-  boolean,
   jsonb,
   integer,
   index,
@@ -137,20 +136,6 @@ export const entrySource = pgTable(
 );
 
 // ============================================================
-// source_feed — Collection pipeline feed configuration
-// ============================================================
-export const sourceFeed = pgTable("source_feed", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  url: text("url").notNull(),
-  feedType: text("feed_type").notNull(),
-  schedule: text("schedule").notNull(),
-  config: jsonb("config"),
-  lastFetchedAt: timestamp("last_fetched_at", { withTimezone: true }),
-  enabled: boolean("enabled").notNull().default(true),
-});
-
-// ============================================================
 // ingest_log — Ingestion audit trail + URL dedup
 // ============================================================
 export const ingestLog = pgTable(
@@ -158,7 +143,6 @@ export const ingestLog = pgTable(
   {
     id: text("id").primaryKey(),
     urlHash: text("url_hash"),
-    sourceFeedId: text("source_feed_id").references(() => sourceFeed.id),
     entryId: text("entry_id"),
     entryCreatedAt: timestamp("entry_created_at", { withTimezone: true }),
     action: text("action").notNull(),
@@ -208,7 +192,6 @@ export const retryQueue = pgTable(
     id: text("id").primaryKey(),
     rawContent: text("raw_content").notNull(),
     sourceUrl: text("source_url"),
-    sourceFeedId: text("source_feed_id").references(() => sourceFeed.id),
     errorReason: text("error_reason"),
     attempts: integer("attempts").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

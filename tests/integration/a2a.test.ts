@@ -1,13 +1,12 @@
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { setupTestDb, cleanTestDb, teardownTestDb } from "../helpers/db";
-import { startMockEmbeddingServer, startMockLlmServer, stopMockServers } from "../helpers/mock-apis";
+import { startMockEmbeddingServer, stopMockServers, MOCK_CODEX_CLI } from "../helpers/mock-apis";
 
 process.env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/knoldr_test";
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
-process.env.KNOLDR_LLM_BASE_URL = "http://localhost:19877";
-process.env.KNOLDR_LLM_API_KEY = "test-key";
+process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
 process.env.KNOLDR_PORT = "19960";
 process.env.KNOLDR_API_TOKEN = "test-token";
 
@@ -50,7 +49,6 @@ beforeAll(async () => {
   }
 
   startMockEmbeddingServer(19876);
-  startMockLlmServer(19877);
 
   const { startServer } = await import("../../src/a2a/server");
   server = startServer();

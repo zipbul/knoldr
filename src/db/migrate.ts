@@ -96,29 +96,12 @@ async function migrate() {
   await sql`CREATE INDEX IF NOT EXISTS idx_entry_source_type ON entry_source(source_type)`;
 
   // ============================================================
-  // source_feed
-  // ============================================================
-  await sql`
-    CREATE TABLE IF NOT EXISTS source_feed (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      url TEXT NOT NULL,
-      feed_type TEXT NOT NULL,
-      schedule TEXT NOT NULL,
-      config JSONB,
-      last_fetched_at TIMESTAMPTZ,
-      enabled BOOLEAN NOT NULL DEFAULT true
-    )
-  `;
-
-  // ============================================================
   // ingest_log
   // ============================================================
   await sql`
     CREATE TABLE IF NOT EXISTS ingest_log (
       id TEXT PRIMARY KEY,
       url_hash TEXT,
-      source_feed_id TEXT REFERENCES source_feed(id),
       entry_id TEXT,
       entry_created_at TIMESTAMPTZ,
       action TEXT NOT NULL CHECK (action IN ('stored', 'duplicate', 'rejected')),
@@ -155,7 +138,6 @@ async function migrate() {
       id TEXT PRIMARY KEY,
       raw_content TEXT NOT NULL,
       source_url TEXT,
-      source_feed_id TEXT REFERENCES source_feed(id),
       error_reason TEXT,
       attempts INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

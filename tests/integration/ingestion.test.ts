@@ -2,9 +2,9 @@ import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test
 import { setupTestDb, cleanTestDb, teardownTestDb, getTestDb, getTestClient } from "../helpers/db";
 import {
   startMockEmbeddingServer,
-  startMockLlmServer,
   stopMockServers,
-  setLlmHandler,
+  MOCK_CODEX_CLI,
+  setCodexHandler,
   fakeEmbedding,
 } from "../helpers/mock-apis";
 
@@ -13,8 +13,7 @@ process.env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://loc
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
-process.env.KNOLDR_LLM_BASE_URL = "http://localhost:19877";
-process.env.KNOLDR_LLM_API_KEY = "test-key";
+process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
 
 // Dynamic imports to pick up env vars
 let ingest: typeof import("../../src/ingest/engine").ingest;
@@ -32,7 +31,6 @@ beforeAll(async () => {
   }
 
   startMockEmbeddingServer(19876);
-  startMockLlmServer(19877);
 
   const engineMod = await import("../../src/ingest/engine");
   const validateMod = await import("../../src/ingest/validate");
@@ -42,7 +40,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
   if (dbAvailable) await cleanTestDb();
-  setLlmHandler(null);
+  setCodexHandler(null);
 });
 
 afterAll(async () => {
@@ -79,22 +77,7 @@ describe("Ingestion Engine — Mode 1 (raw)", () => {
   test("handles LLM returning multiple entries", async () => {
     if (!dbAvailable) return;
 
-    setLlmHandler(() => ({
-      content: [
-        {
-          type: "tool_use",
-          id: "call_1",
-          name: "store_entries",
-          input: {
-            entries: [
-              { title: "Entry 1", content: "First topic", domain: ["tech"], tags: [], language: "en", decayRate: 0.01 },
-              { title: "Entry 2", content: "Second topic", domain: ["tech"], tags: [], language: "en", decayRate: 0.02 },
-            ],
-          },
-        },
-      ],
-      stop_reason: "tool_use",
-    }));
+    setCodexHandler("multi");
 
     const input = parseStoreInput({ raw: "Multi-topic article" });
     const results = await ingest(input);
@@ -107,10 +90,7 @@ describe("Ingestion Engine — Mode 1 (raw)", () => {
   test("logs rejected when LLM fails", async () => {
     if (!dbAvailable) return;
 
-    setLlmHandler(() => ({
-      content: [{ type: "text", text: "I cannot process this" }],
-      stop_reason: "end_turn",
-    }));
+    setCodexHandler("fail");
 
     const input = parseStoreInput({ raw: "Bad input that LLM can't handle" });
     const results = await ingest(input);

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { setupTestDb, cleanTestDb, teardownTestDb } from "../helpers/db";
-import { startMockEmbeddingServer, startMockLlmServer, stopMockServers } from "../helpers/mock-apis";
+import { startMockEmbeddingServer, stopMockServers, MOCK_CODEX_CLI } from "../helpers/mock-apis";
 import { join } from "path";
 
 const CLI_PATH = join(import.meta.dir, "../../src/cli/index.ts");
@@ -10,8 +10,7 @@ const env = {
   DATABASE_URL: process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/knoldr_test",
   KNOLDR_EMBEDDING_BASE_URL: "http://localhost:19879",
   KNOLDR_EMBEDDING_API_KEY: "test-key",
-  KNOLDR_LLM_BASE_URL: "http://localhost:19880",
-  KNOLDR_LLM_API_KEY: "test-key",
+  KNOLDR_CODEX_CLI: MOCK_CODEX_CLI,
   KNOLDR_LOG_LEVEL: "error",
 };
 
@@ -42,7 +41,6 @@ beforeAll(async () => {
   }
 
   startMockEmbeddingServer(19879);
-  startMockLlmServer(19880);
 });
 
 afterEach(async () => {

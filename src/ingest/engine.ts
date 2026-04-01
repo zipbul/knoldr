@@ -116,7 +116,7 @@ async function processEntry(
   const embedding = await generateEmbedding(embeddingText);
 
   // Step 4: Semantic dedup
-  const duplicate = await isDuplicate(embedding, domains);
+  const duplicate = await isDuplicate(embedding);
   if (duplicate) {
     await db.insert(ingestLog).values({
       id: ulid(),

@@ -29,7 +29,7 @@ async function migrate() {
       decay_rate DOUBLE PRECISION NOT NULL DEFAULT 0.01 CHECK (decay_rate >= 0 AND decay_rate <= 1),
       status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active')),
       created_at TIMESTAMPTZ NOT NULL,
-      embedding vector(1536) NOT NULL,
+      embedding vector(384) NOT NULL,
       PRIMARY KEY (id, created_at)
     ) PARTITION BY RANGE (created_at)
   `;

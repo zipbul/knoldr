@@ -46,7 +46,7 @@ export async function setupTestDb() {
       decay_rate DOUBLE PRECISION NOT NULL DEFAULT 0.01,
       status TEXT NOT NULL DEFAULT 'draft',
       created_at TIMESTAMPTZ NOT NULL,
-      embedding vector(1536) NOT NULL,
+      embedding vector(384) NOT NULL,
       PRIMARY KEY (id, created_at)
     )
   `;

@@ -16,12 +16,12 @@ import { sql } from "drizzle-orm";
 
 // -- Custom pgvector column type
 // Drizzle doesn't have built-in vector support; use a custom column via sql.
-// We store vectors as vector(1536) and use sql template for operations.
+// We store vectors as vector(384) and use sql template for operations.
 import { customType } from "drizzle-orm/pg-core";
 
 const vector = customType<{ data: number[]; driverParam: string }>({
   dataType() {
-    return "vector(1536)";
+    return "vector(384)";
   },
   toDriver(value: number[]): string {
     return `[${value.join(",")}]`;

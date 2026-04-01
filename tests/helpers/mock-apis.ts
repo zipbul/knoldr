@@ -11,8 +11,8 @@ interface MockEmbeddingResponse {
 
 /** Create a deterministic fake embedding (1536-dim, based on text hash) */
 export function fakeEmbedding(text: string): number[] {
-  const vec = new Array(1536).fill(0);
-  for (let i = 0; i < text.length && i < 1536; i++) {
+  const vec = new Array(384).fill(0);
+  for (let i = 0; i < text.length && i < 384; i++) {
     vec[i] = (text.charCodeAt(i) % 100) / 100;
   }
   return vec;

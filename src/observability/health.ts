@@ -25,12 +25,10 @@ export async function getHealthStatus() {
   } catch {
     llmApiStatus = "down";
   }
-  const embeddingApiStatus = process.env.KNOLDR_EMBEDDING_API_KEY ? "up" : "unconfigured";
-
   return {
     db: dbStatus,
     llmApi: llmApiStatus,
-    embeddingApi: embeddingApiStatus,
+    embedding: "local", // @huggingface/transformers, no API key needed
     uptime: process.uptime(),
     entryCount,
     latencyMs: Date.now() - startTime,

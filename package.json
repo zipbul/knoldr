@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.3.13",
+    "@huggingface/transformers": "^4.0.0",
     "@mozilla/readability": "^0.6.0",
     "drizzle-orm": "^0.45.2",
     "linkedom": "^0.18.12",

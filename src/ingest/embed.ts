@@ -1,16 +1,25 @@
 import { logger } from "../observability/logger";
 
-const MAX_TOKENS = 8000;
+const MAX_TOKENS = 256; // all-MiniLM-L6-v2 max token limit
+const EMBEDDING_DIM = 384;
 
-function getEmbeddingConfig() {
-  return {
-    baseUrl: process.env.KNOLDR_EMBEDDING_BASE_URL ?? "https://api.openai.com/v1",
-    apiKey: process.env.KNOLDR_EMBEDDING_API_KEY,
-    model: process.env.KNOLDR_EMBEDDING_MODEL ?? "text-embedding-3-small",
-  };
+// If KNOLDR_EMBEDDING_BASE_URL is set, use HTTP API (for testing with mock server).
+// Otherwise, use local @huggingface/transformers model.
+const USE_LOCAL = !process.env.KNOLDR_EMBEDDING_BASE_URL;
+
+let pipelineInstance: ((text: string, opts?: Record<string, unknown>) => Promise<{ tolist: () => number[][] }>) | null = null;
+
+async function getPipeline() {
+  if (!pipelineInstance) {
+    const { pipeline } = await import("@huggingface/transformers");
+    pipelineInstance = (await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+      dtype: "q8",
+    })) as unknown as typeof pipelineInstance;
+    logger.info("local embedding model loaded: all-MiniLM-L6-v2 (384dim, q8)");
+  }
+  return pipelineInstance!;
 }
 
-// Rough token estimate: 1 token ≈ 4 bytes (conservative for mixed content)
 function estimateTokens(text: string): number {
   return Math.ceil(new TextEncoder().encode(text).length / 4);
 }
@@ -18,7 +27,6 @@ function estimateTokens(text: string): number {
 function truncateToTokenLimit(text: string, maxTokens: number): string {
   if (estimateTokens(text) <= maxTokens) return text;
 
-  // Truncate at sentence boundaries
   const sentences = text.split(/(?<=[.!?])\s+/);
   let result = "";
   for (const sentence of sentences) {
@@ -26,7 +34,7 @@ function truncateToTokenLimit(text: string, maxTokens: number): string {
     if (estimateTokens(candidate) > maxTokens) break;
     result = candidate;
   }
-  return result || text.slice(0, maxTokens * 4); // fallback: rough byte cut
+  return result || text.slice(0, maxTokens * 4);
 }
 
 export function buildEmbeddingInput(title: string, content: string): string {
@@ -35,99 +43,51 @@ export function buildEmbeddingInput(title: string, content: string): string {
 }
 
 export async function generateEmbedding(text: string): Promise<number[]> {
-  const { apiKey, baseUrl, model } = getEmbeddingConfig();
-  if (!apiKey) {
-    throw new Error("KNOLDR_EMBEDDING_API_KEY environment variable is required");
+  if (USE_LOCAL) {
+    const pipe = await getPipeline();
+    const output = await pipe(text, { pooling: "mean", normalize: true });
+    return output.tolist()[0]!;
   }
-
-  const url = `${baseUrl}/embeddings`;
-
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          input: text,
-        }),
-      });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Embedding API error ${res.status}: ${body}`);
-      }
-
-      const json = (await res.json()) as {
-        data: Array<{ embedding: number[] }>;
-      };
-
-      const embedding = json.data[0]?.embedding;
-      if (!embedding) {
-        throw new Error("Embedding API returned no data");
-      }
-
-      return embedding;
-    } catch (err) {
-      lastError = err as Error;
-      logger.warn({ attempt, error: lastError.message }, "embedding API attempt failed");
-      if (attempt < 2) {
-        await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
-      }
-    }
-  }
-
-  throw lastError!;
+  return generateEmbeddingApi(text);
 }
 
 export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
-  const { apiKey, baseUrl, model } = getEmbeddingConfig();
-  if (!apiKey) {
-    throw new Error("KNOLDR_EMBEDDING_API_KEY environment variable is required");
-  }
-
-  const url = `${baseUrl}/embeddings`;
-
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          input: texts,
-        }),
-      });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Embedding API error ${res.status}: ${body}`);
-      }
-
-      const json = (await res.json()) as {
-        data: Array<{ embedding: number[]; index: number }>;
-      };
-
-      // Sort by index to maintain order
-      return json.data
-        .sort((a, b) => a.index - b.index)
-        .map((d) => d.embedding);
-    } catch (err) {
-      lastError = err as Error;
-      logger.warn({ attempt, error: lastError.message }, "embedding batch API attempt failed");
-      if (attempt < 2) {
-        await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
-      }
+  if (USE_LOCAL) {
+    const pipe = await getPipeline();
+    const results: number[][] = [];
+    for (const text of texts) {
+      const output = await pipe(text, { pooling: "mean", normalize: true });
+      results.push(output.tolist()[0]!);
     }
+    return results;
   }
+  return generateEmbeddingsApi(texts);
+}
 
-  throw lastError!;
+// --- API fallback (for testing with mock server) ---
+
+async function generateEmbeddingApi(text: string): Promise<number[]> {
+  const baseUrl = process.env.KNOLDR_EMBEDDING_BASE_URL!;
+  const apiKey = process.env.KNOLDR_EMBEDDING_API_KEY ?? "test";
+
+  const res = await fetch(`${baseUrl}/embeddings`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ model: "test", input: text }),
+  });
+
+  if (!res.ok) throw new Error(`Embedding API error ${res.status}`);
+  const json = (await res.json()) as { data: Array<{ embedding: number[] }> };
+  return json.data[0]?.embedding ?? new Array(EMBEDDING_DIM).fill(0);
+}
+
+async function generateEmbeddingsApi(texts: string[]): Promise<number[][]> {
+  const results: number[][] = [];
+  for (const text of texts) {
+    results.push(await generateEmbeddingApi(text));
+  }
+  return results;
 }

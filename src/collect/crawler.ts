@@ -1,4 +1,4 @@
-import { extractHtml } from "./extract-html";
+import { extractFromPage } from "./extract-html";
 import { extractPdf } from "./extract-pdf";
 import { extractImage } from "./extract-image";
 import { extractYoutubeByUrl } from "./extract-youtube";
@@ -29,67 +29,74 @@ interface QueueItem {
 const YOUTUBE_PATTERN = /(?:youtube\.com\/watch|youtu\.be\/)/;
 
 /**
- * Deep crawl loop: visit URLs, extract content, follow links.
+ * Deep crawl loop: single browser instance, visit URLs, extract content, follow links.
  */
 export async function crawl(seedUrls: string[], options: CrawlOptions, deadline: number): Promise<CrawlResult> {
+  const { chromium } = await import("playwright");
+
   const visited = new Set<string>();
   const queue: QueueItem[] = seedUrls.map((url) => ({ url, depth: 0 }));
   const results: CrawlResult = { entries: [], urlsCrawled: 0 };
 
-  while (queue.length > 0 && results.urlsCrawled < options.maxUrls && Date.now() < deadline) {
-    const item = queue.shift()!;
-    if (visited.has(item.url)) continue;
-    visited.add(item.url);
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  });
 
-    try {
-      const extracted = await visitUrl(item.url, options, visited);
-      results.urlsCrawled++;
+  try {
+    while (queue.length > 0 && results.urlsCrawled < options.maxUrls && Date.now() < deadline) {
+      const item = queue.shift()!;
+      if (visited.has(item.url)) continue;
+      visited.add(item.url);
 
-      if (!extracted) continue;
+      try {
+        const extracted = await visitUrl(item.url, options, context);
+        results.urlsCrawled++;
 
-      // Ingest extracted content
-      if (extracted.text) {
-        try {
-          const storeInput = parseStoreInput({
-            raw: extracted.text.slice(0, 200_000),
-            sources: [{ url: item.url, sourceType: extracted.sourceType }],
-          });
-          const ingestResults = await ingest(storeInput);
-          for (const r of ingestResults) {
-            results.entries.push({ entryId: r.entryId, action: r.action });
+        if (!extracted) continue;
+
+        // Ingest extracted content
+        if (extracted.text) {
+          try {
+            const storeInput = parseStoreInput({
+              raw: extracted.text.slice(0, 200_000),
+              sources: [{ url: item.url, sourceType: extracted.sourceType }],
+            });
+            const ingestResults = await ingest(storeInput);
+            for (const r of ingestResults) {
+              results.entries.push({ entryId: r.entryId, action: r.action });
+            }
+          } catch (err) {
+            logger.warn({ url: item.url, error: (err as Error).message }, "ingestion failed during crawl");
           }
-        } catch (err) {
-          logger.warn({ url: item.url, error: (err as Error).message }, "ingestion failed during crawl");
         }
-      }
 
-      // Collect and filter links for deeper crawling
-      if (extracted.links && item.depth < options.maxDepth && results.urlsCrawled < options.maxUrls) {
-        const domain = new URL(item.url).hostname;
-        const { sameDomain, external } = preFilterLinks(extracted.links, visited, domain);
+        // Collect and filter links for deeper crawling
+        if (extracted.links.length > 0 && item.depth < options.maxDepth && results.urlsCrawled < options.maxUrls) {
+          const domain = new URL(item.url).hostname;
+          const { sameDomain, external } = preFilterLinks(extracted.links, visited, domain);
 
-        // Budget remaining for link following
-        const remainingBudget = options.maxUrls - results.urlsCrawled - queue.length;
-        if (remainingBudget > 0) {
-          // Same-domain links get priority
-          const sameDomainSelected = sameDomain.slice(0, Math.ceil(remainingBudget * 0.7));
+          const remainingBudget = options.maxUrls - results.urlsCrawled - queue.length;
+          if (remainingBudget > 0) {
+            const sameDomainSelected = sameDomain.slice(0, Math.ceil(remainingBudget * 0.7));
+            const externalBudget = Math.max(1, Math.floor(remainingBudget * 0.3));
+            const externalSelected = external.length > externalBudget
+              ? await llmSelectLinks(external, options.topic, externalBudget)
+              : external.slice(0, externalBudget);
 
-          // External links: LLM selection if many
-          const externalBudget = Math.max(1, Math.floor(remainingBudget * 0.3));
-          const externalSelected = external.length > externalBudget
-            ? await llmSelectLinks(external, options.topic, externalBudget)
-            : external.slice(0, externalBudget);
-
-          for (const url of [...sameDomainSelected, ...externalSelected]) {
-            if (!visited.has(url)) {
-              queue.push({ url, depth: item.depth + 1 });
+            for (const url of [...sameDomainSelected, ...externalSelected]) {
+              if (!visited.has(url)) {
+                queue.push({ url, depth: item.depth + 1 });
+              }
             }
           }
         }
+      } catch (err) {
+        logger.debug({ url: item.url, error: (err as Error).message }, "crawl visit failed");
       }
-    } catch (err) {
-      logger.debug({ url: item.url, error: (err as Error).message }, "crawl visit failed");
     }
+  } finally {
+    await browser.close();
   }
 
   return results;
@@ -98,18 +105,18 @@ export async function crawl(seedUrls: string[], options: CrawlOptions, deadline:
 interface ExtractResult {
   text: string | null;
   sourceType: string;
-  links: string[] | null;
+  links: string[];
 }
 
 async function visitUrl(
   url: string,
   options: CrawlOptions,
-  visited: Set<string>,
+  context: import("playwright").BrowserContext,
 ): Promise<ExtractResult | null> {
-  // YouTube special handling
+  // YouTube special handling (no browser needed)
   if (YOUTUBE_PATTERN.test(url) && options.contentTypes.has("youtube")) {
     const text = await extractYoutubeByUrl(url);
-    return text ? { text, sourceType: "community_forum", links: null } : null;
+    return text ? { text, sourceType: "community_forum", links: [] } : null;
   }
 
   const parsedUrl = new URL(url);
@@ -144,51 +151,47 @@ async function visitUrl(
     // Assume HTML if HEAD fails
   }
 
-  let text: string | null = null;
-  let links: string[] | null = null;
-  let sourceType = policy.sourceType !== "unknown" ? policy.sourceType : estimateSourceType(url);
+  const sourceType = policy.sourceType !== "unknown" ? policy.sourceType : estimateSourceType(url);
 
   // Dispatch by content type
   if (contentType.startsWith("text/html") && options.contentTypes.has("html")) {
-    text = await extractHtml(url);
-    // Extract links from page (re-fetch is avoided by extractHtml using Playwright)
-    links = await extractLinksFromPage(url);
-  } else if (contentType === "application/pdf" && options.contentTypes.has("pdf")) {
-    text = await extractPdf(url);
-  } else if (contentType.startsWith("image/") && options.contentTypes.has("image")) {
-    text = await extractImage(url);
-  } else {
-    // Unsupported content type
-    await updateDomainStats(domain, false);
-    return null;
+    // Single page visit: extract text + links together
+    const page = await context.newPage();
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(2000); // SPA stabilization
+
+      const { text, links } = await extractFromPage(page);
+      const success = text !== null && text.length >= 100;
+      await updateDomainStats(domain, success);
+
+      if (!success) return null;
+      return { text, sourceType, links };
+    } catch (err) {
+      logger.debug({ url, error: (err as Error).message }, "HTML page visit failed");
+      await updateDomainStats(domain, false);
+      return null;
+    } finally {
+      await page.close();
+    }
   }
 
-  const success = text !== null && text.length >= 100;
-  await updateDomainStats(domain, success);
-
-  if (!success) return null;
-
-  return { text, sourceType, links };
-}
-
-async function extractLinksFromPage(url: string): Promise<string[]> {
-  try {
-    const { chromium } = await import("playwright");
-    const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10000 });
-
-    const links = await page.evaluate(`
-      Array.from(document.querySelectorAll("a[href]"))
-        .map(a => a.href)
-        .filter(href => href.startsWith("http"))
-    `) as string[];
-
-    await browser.close();
-    return [...new Set(links)];
-  } catch {
-    return [];
+  if (contentType === "application/pdf" && options.contentTypes.has("pdf")) {
+    const text = await extractPdf(url);
+    const success = text !== null && text.length >= 100;
+    await updateDomainStats(domain, success);
+    return success ? { text, sourceType, links: [] } : null;
   }
+
+  if (contentType.startsWith("image/") && options.contentTypes.has("image")) {
+    const text = await extractImage(url);
+    const success = text !== null && text.length >= 100;
+    await updateDomainStats(domain, success);
+    return success ? { text, sourceType, links: [] } : null;
+  }
+
+  await updateDomainStats(domain, false);
+  return null;
 }
 
 function estimateSourceType(url: string): string {

@@ -1,35 +1,42 @@
 import { logger } from "../observability/logger";
+import type { Page } from "playwright";
+
+export interface HtmlExtraction {
+  text: string | null;
+  links: string[];
+}
 
 /**
- * Extract article text from HTML page using Playwright + Readability.
- * Handles SSR, SPA, JS-rendered content.
+ * Extract article text + links from an already-loaded Playwright page.
+ * The caller manages the browser/page lifecycle.
  */
-export async function extractHtml(url: string): Promise<string | null> {
+export async function extractFromPage(page: Page): Promise<HtmlExtraction> {
   try {
-    const { chromium } = await import("playwright");
     const { Readability } = await import("@mozilla/readability");
     const { parseHTML } = await import("linkedom");
 
-    const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-    await page.waitForTimeout(2000); // SPA stabilization
-
     const html = await page.content();
-    await browser.close();
 
+    // Extract links before Readability mutates
+    const links = await page.evaluate(`
+      Array.from(document.querySelectorAll("a[href]"))
+        .map(a => a.href)
+        .filter(href => href.startsWith("http"))
+    `) as string[];
+
+    // Extract article text
     const { document } = parseHTML(html);
     const reader = new Readability(document);
     const article = reader.parse();
 
-    if (!article?.textContent || article.textContent.length < 100) {
-      return null;
-    }
+    const text = article?.textContent?.trim() ?? null;
 
-    return article.textContent.trim();
+    return {
+      text: text && text.length >= 100 ? text : null,
+      links: [...new Set(links)],
+    };
   } catch (err) {
-    logger.debug({ url, error: (err as Error).message }, "HTML extraction failed");
-    return null;
+    logger.debug({ error: (err as Error).message }, "HTML extraction failed");
+    return { text: null, links: [] };
   }
 }

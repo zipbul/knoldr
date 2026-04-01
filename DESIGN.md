@@ -66,7 +66,7 @@ Authority Score      + factuality              + actionability
 A2A Server
 Deep Crawl Engine
   쿼리 분해 (Query Decomposition)
-  CSE → seed URL → 딥크롤링 (링크 추적)
+  DuckDuckGo → seed URL → 딥크롤링 (링크 추적)
   HTML + PDF + 이미지 + YouTube
   도메인 정책 (crawl_domain)
 CLI
@@ -246,13 +246,12 @@ GPT-4급 멀티모델 심의로 미묘한 자연어 추론(NLI) 판단 가능.
 └───────────────────────────────────────────────────────────────┘
 
 ┌─ web_search(claim) ──────────────────────────────────────────┐
-│  Claim → 검색 쿼리 변환 → Google Custom Search API            │
+│  Claim → 검색 쿼리 변환 → DuckDuckGo Lite (HTTP scraping)     │
 │  상위 5개 결과 fetch → Pyreez가 각각 대조                      │
 │  출처 독립성 검사 (같은 원본 퍼나른 것은 1개로 카운트)          │
 │  결과: { independent_supporting: N, contradicting: N }        │
 │                                                               │
 │  한계:                                                        │
-│  - 유료 API (일일 예산 제한)                                   │
 │  - 합의 ≠ 진실 (잘못된 정보도 널리 퍼질 수 있음)               │
 │  - 니치한 주장은 검색 결과 없을 수 있음                        │
 └───────────────────────────────────────────────────────────────┘
@@ -303,11 +302,10 @@ Pyreez 멀티모델 심의가 각 단계 결과를 종합하여 최종 판정.
 per claim:
   Pyreez: 패키지 설치, deliberation engine 직접 호출 (GPT-4급 모델 3-5개 심의)
   source_check: Playwright + Readability (자체 호스팅)
-  web_search: Google Custom Search API ($5/1K queries)
+  web_search: DuckDuckGo Lite HTTP scraping (무료, API key 불필요)
   db_cross_ref: DB 검색 (무료)
 
 일일 예산:
-  web_search: 하루 최대 500회
   Playwright: 자체 호스팅, 한도 없음
   초과 시: verdict = unverified, 다음 날 재시도
 
@@ -621,7 +619,7 @@ store/query/explore/feedback/audit 상세 — 구현 완료 (코드가 source of
     │
     ▼
   Deep Crawl Engine 시작 (비동기 Task)
-    → 쿼리 분해 → CSE → seed URL → 딥크롤링 → 적재
+    → 쿼리 분해 → DuckDuckGo → seed URL → 딥크롤링 → 적재
     → GetTask로 진행 상황 조회 가능
     │
     ▼
@@ -663,9 +661,9 @@ research 요청 수신
         { main: "xz supply chain attack analysis", expansions: ["open source supply chain security"] }
     │
     ▼
-2. Seed URL 수집 (Google Custom Search API)
-    서브쿼리별 CSE 호출 → 쿼리당 상위 10개 URL
-    + expansion 쿼리도 각각 CSE 호출
+2. Seed URL 수집 (DuckDuckGo Lite HTTP scraping)
+    서브쿼리별 DuckDuckGo 호출 → 쿼리당 상위 10개 URL
+    + expansion 쿼리도 각각 DuckDuckGo 호출
     중복 URL 제거 → seed URL 풀 구성
     │
     ▼
@@ -752,8 +750,7 @@ PDF:
   이미지 크기 제한: 최대 10MB.
 
 YouTube:
-  YouTube Data API: 검색 (videoCaption=closedCaption, 자막 있는 영상만).
-  자막 추출: innertube API → captionTracks → 자막 XML 파싱.
+  자막 추출: innertube scraping → captionTracks → 자막 XML 파싱 (API key 불필요).
   자막 없음: Gemini CLI 멀티모달 (영상 프레임 분석). 비용 높으므로 예산 내에서만.
   쿼리당 상위 3개 영상.
 ```
@@ -808,9 +805,8 @@ URL 예산 (maxUrls): 기본 50, 최대 200.
 타임아웃: 15분 (URL당 평균 15초 × 50 URL = 12.5분 + 여유).
   타임아웃 도달 시 즉시 partial 반환.
 
-Google Custom Search: 하루 100회 무료, 초과 시 $5/1,000 쿼리.
-YouTube Data API: 일일 10,000 unit 쿼터 (search=100 units, 실질 100회/일).
-API 한도 초과 시: 에러 코드 1005, partial 반환.
+DuckDuckGo Lite: HTTP scraping, 무료, API key 불필요.
+YouTube 자막: innertube scraping, 무료, API key 불필요.
 
 동시 research 태스크: 최대 3개 (Playwright 브라우저 리소스 제한).
   초과 시 큐 대기.
@@ -846,7 +842,7 @@ knoldr/
 │   ├── ingest/
 │   │   ├── engine.ts                # 적재 파이프라인 오케스트레이션
 │   │   ├── decompose.ts             # 원자적 분해 + 메타데이터 분류 [Codex CLI]
-│   │   ├── embed.ts                 # 임베딩 생성 (Cloud API, 중복 감지용)
+│   │   ├── embed.ts                 # 임베딩 생성 (로컬 @huggingface/transformers, 중복 감지용)
 │   │   ├── dedup.ts                 # 시맨틱 중복 감지 (cosine > 0.95)
 │   │   └── validate.ts              # 입력 검증 (크기, 형식)
 │   ├── score/
@@ -889,7 +885,7 @@ knoldr/
 | DB | PostgreSQL | 동시성, JSONB, 파티셔닝 |
 | FTS | pgroonga | 다국어 FTS (CJK 네이티브 토큰화). PostgreSQL extension. |
 | Vector Store | pgvector | 중복 감지 + 스코어링 전용. 검색에 사용하지 않음. |
-| Embedding | OpenAI text-embedding-3-small | 1536dim, 다국어, $0.02/M tokens. OpenAI 호환 형식 — 제공업체 교체 가능. |
+| Embedding | @huggingface/transformers (all-MiniLM-L6-v2) | 384dim, 로컬 실행, API key 불필요. |
 | ORM | drizzle-orm | 타입 세이프, PostgreSQL 지원. raw SQL 최소화. |
 | DB Driver | postgres (porsager) | Bun 호환, 고성능 |
 | Migration | drizzle-kit | drizzle-orm 통합 |
@@ -898,18 +894,18 @@ knoldr/
 | DOM Parser | linkedom + @mozilla/readability | Playwright 추출 HTML의 본문 파싱 |
 | A2A | @a2a-js/sdk (타입 + server 코어) + Bun.serve() | SDK가 타입 + JSON-RPC 파싱/라우팅 제공. Express 불필요 (optional peer dep). HTTP 레이어만 Bun-native. |
 | Verification | pyreez (설치형) | 멀티모델 심의, deliberation engine 직접 호출 (v0.3) |
-| Web Search | Google Custom Search API | 가장 정확한 검색 결과. $5/1K queries. |
+| Web Search | DuckDuckGo Lite (HTTP scraping) | API key 불필요. 무료. |
 | Content Extraction | Playwright + @mozilla/readability | JS 렌더링 + 본문 추출 (SSR/SPA 대응). 자체 호스팅. |
 | PDF Extraction | pdf-parse | PDF → 텍스트 추출. 표/목차 포함. |
 | Image Extraction | Gemini CLI (멀티모달) | 이미지 → 텍스트. 다이어그램/스크린샷/인포그래픽 대응. 구독제. |
-| Video Transcript | YouTube Data API + 자막 파싱 | 영상 콘텐츠 텍스트화. 자막 없으면 Gemini 멀티모달 폴백. |
+| Video Transcript | innertube scraping + 자막 파싱 | 영상 콘텐츠 텍스트화. API key 불필요. 자막 없으면 Gemini 멀티모달 폴백. |
 | Observability | prom-client + pino | Prometheus 메트릭 + 구조화 로그 |
 
 ### 하드웨어 요구사항
 
 ```
 최소:
-  GPU: 불필요 (Cloud API 사용)
+  GPU: 불필요 (로컬 임베딩은 CPU로 실행)
   RAM: 4GB+ (Bun + PostgreSQL)
   Storage: SSD, PostgreSQL 데이터 + pgroonga 인덱스
 
@@ -926,18 +922,11 @@ knoldr/
 | `KNOLDR_API_TOKEN` | X | - | A2A Bearer token 인증. 미설정 시 open access. |
 | `KNOLDR_CODEX_CLI` | X | `codex` | Codex CLI 실행 경로 (분해용) |
 | `KNOLDR_GEMINI_CLI` | X | `gemini` | Gemini CLI 실행 경로 (리서치용) |
-| `KNOLDR_EMBEDDING_API_KEY` | O | - | Embedding API key (OpenAI 호환) |
-| `KNOLDR_EMBEDDING_MODEL` | X | `text-embedding-3-small` | Embedding 모델 |
-| `KNOLDR_EMBEDDING_BASE_URL` | X | `https://api.openai.com/v1` | Embedding API base URL |
-| `KNOLDR_GOOGLE_API_KEY` | X | - | Google Custom Search API key (research 스킬용) |
-| `KNOLDR_GOOGLE_CSE_ID` | X | - | Google Custom Search Engine ID |
-| `KNOLDR_YOUTUBE_API_KEY` | X | - | YouTube Data API key (research 영상 검색용) |
 | `KNOLDR_PORT` | X | `3000` | 서버 포트 |
 | `KNOLDR_HOST` | X | `0.0.0.0` | 서버 바인드 주소 |
 | `KNOLDR_LOG_LEVEL` | X | `info` | 로그 레벨 (`error`, `warn`, `info`, `debug`) |
 
-`KNOLDR_GOOGLE_API_KEY` + `KNOLDR_GOOGLE_CSE_ID`: research 스킬에 필요. 미설정 시 research 호출 → 에러 코드 -32603.
-`KNOLDR_YOUTUBE_API_KEY`: research 영상 검색용. 미설정 시 YouTube 검색 스킵 (웹 검색만 수행).
+웹 검색은 DuckDuckGo Lite HTTP scraping (API key 불필요), 임베딩은 로컬 @huggingface/transformers (API key 불필요), YouTube 자막은 innertube scraping (API key 불필요).
 
 ### CLI Specification — 구현 완료 (`src/cli/index.ts`, `knoldr --help`)
 
@@ -959,7 +948,7 @@ knoldr/
 - Deep Crawl Engine:
   - crawl_domain 테이블 + 마이그레이션
   - 쿼리 분해 + 확장 (Query Decomposition, Gemini CLI)
-  - CSE → seed URL → Playwright 딥크롤링 (링크 추적, LLM 선별)
+  - DuckDuckGo → seed URL → Playwright 딥크롤링 (링크 추적, LLM 선별)
   - 멀티타입 추출 (HTML/Readability, PDF/pdf-parse, 이미지/Gemini 멀티모달, YouTube/자막)
   - 도메인 정책 (robots.txt 파싱, rate limit, 자동 차단)
   - 링크 필터 (규칙 사전 필터 + LLM 선별)

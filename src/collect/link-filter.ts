@@ -1,6 +1,8 @@
 import { logger } from "../observability/logger";
 
-const GEMINI_CLI = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
+function getGeminiCli() {
+  return process.env.KNOLDR_GEMINI_CLI ?? "gemini";
+}
 
 // Extensions to always skip
 const SKIP_EXTENSIONS = new Set([
@@ -82,7 +84,7 @@ export async function llmSelectLinks(
   if (links.length === 0) return [];
   if (links.length <= maxLinks) return links;
 
-  const cliParts = GEMINI_CLI.split(/\s+/);
+  const cliParts = getGeminiCli().split(/\s+/);
   const linkList = links.map((l, i) => `${i}: ${l}`).join("\n");
   const prompt = `You are a link relevance filter. Given a research topic and a list of URLs, select the ${maxLinks} URLs most likely to contain useful information about the topic.
 

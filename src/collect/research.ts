@@ -1,4 +1,5 @@
 import { decomposeQuery } from "./query-decompose";
+import { collectSeedUrls } from "./search-scraper";
 import { crawl } from "./crawler";
 import { searchAndExtractYoutube } from "./extract-youtube";
 import { ingest } from "../ingest/engine";
@@ -42,7 +43,7 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
   const subQueries = await decomposeQuery(input.topic);
   logger.info({ queryCount: subQueries.length, queries: subQueries.map((q) => q.main) }, "queries decomposed");
 
-  // Step 2: Seed URL collection via Google CSE
+  // Step 2: Seed URL collection (Google/DuckDuckGo scraping, no API key)
   const seedUrls = await collectSeedUrls(subQueries, input.focusDomains);
   logger.info({ seedCount: seedUrls.length }, "seed URLs collected");
 
@@ -104,71 +105,3 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
   };
 }
 
-async function collectSeedUrls(
-  subQueries: Array<{ main: string; expansions: string[] }>,
-  focusDomains?: string[],
-): Promise<string[]> {
-  const googleApiKey = process.env.KNOLDR_GOOGLE_API_KEY;
-  const googleCseId = process.env.KNOLDR_GOOGLE_CSE_ID;
-  if (!googleApiKey || !googleCseId) {
-    throw new Error("KNOLDR_GOOGLE_API_KEY and KNOLDR_GOOGLE_CSE_ID required for research");
-  }
-
-  const allUrls = new Set<string>();
-
-  // Collect all queries: main + expansions
-  const queries: string[] = [];
-  for (const sq of subQueries) {
-    queries.push(sq.main);
-    for (const exp of sq.expansions) {
-      queries.push(exp);
-    }
-  }
-
-  for (const query of queries) {
-    try {
-      const params = new URLSearchParams({
-        key: googleApiKey,
-        cx: googleCseId,
-        q: query,
-        num: "10",
-      });
-
-      const res = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`, {
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!res.ok) continue;
-
-      const json = (await res.json()) as {
-        items?: Array<{ link: string }>;
-      };
-
-      for (const item of json.items ?? []) {
-        allUrls.add(item.link);
-      }
-    } catch (err) {
-      logger.warn({ query, error: (err as Error).message }, "CSE query failed");
-    }
-  }
-
-  // Prioritize focus domains
-  if (focusDomains && focusDomains.length > 0) {
-    const focused: string[] = [];
-    const rest: string[] = [];
-    for (const url of allUrls) {
-      try {
-        const hostname = new URL(url).hostname;
-        if (focusDomains.some((d) => hostname === d || hostname.endsWith(`.${d}`))) {
-          focused.push(url);
-        } else {
-          rest.push(url);
-        }
-      } catch {
-        rest.push(url);
-      }
-    }
-    return [...focused, ...rest];
-  }
-
-  return [...allUrls];
-}

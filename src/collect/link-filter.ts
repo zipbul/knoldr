@@ -30,6 +30,7 @@ export function preFilterLinks(
 ): { sameDomain: string[]; external: string[] } {
   const sameDomain: string[] = [];
   const external: string[] = [];
+  const seen = new Set<string>();
 
   for (const link of links) {
     // Skip visited
@@ -42,6 +43,12 @@ export function preFilterLinks(
       // Skip non-http
       if (!url.protocol.startsWith("http")) continue;
 
+      // Normalize: strip hash/anchor
+      url.hash = "";
+      const normalized = url.href;
+      if (visitedUrls.has(normalized) || seen.has(normalized)) continue;
+      seen.add(normalized);
+
       // Skip extensions
       const ext = url.pathname.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase();
       if (ext && SKIP_EXTENSIONS.has(ext)) continue;
@@ -49,11 +56,11 @@ export function preFilterLinks(
       // Skip patterns
       if (SKIP_PATTERNS.some((p) => p.test(url.pathname))) continue;
 
-      // Classify
+      // Classify (use normalized URL without hash)
       if (url.hostname === currentDomain || url.hostname.endsWith(`.${currentDomain}`)) {
-        sameDomain.push(link);
+        sameDomain.push(normalized);
       } else {
-        external.push(link);
+        external.push(normalized);
       }
     } catch {
       continue; // Invalid URL

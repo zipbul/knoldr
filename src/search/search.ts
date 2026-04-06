@@ -31,9 +31,12 @@ export async function search(input: QueryInput): Promise<SearchResult> {
     conditions.push(gte(entry.authority, trustLevelToMinAuthority(input.minTrustLevel)));
   }
 
-  // pgroonga FTS
+  // pgroonga FTS — convert query words to OR matching for better recall
+  // AI agents send precise queries, but AND matching is too strict when
+  // entries are atomically decomposed (each covers one aspect).
+  const orQuery = input.query.trim().split(/\s+/).join(" OR ");
   conditions.push(
-    sql`(${entry.title} &@~ ${input.query} OR ${entry.content} &@~ ${input.query})`,
+    sql`(${entry.title} &@~ ${orQuery} OR ${entry.content} &@~ ${orQuery})`,
   );
 
   // Domain filter

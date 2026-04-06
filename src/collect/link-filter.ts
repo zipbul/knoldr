@@ -1,5 +1,14 @@
 import { logger } from "../observability/logger";
 
+function extractJsonFromOutput(text: string): unknown {
+  try { return JSON.parse(text); } catch { /* ignore */ }
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) { try { return JSON.parse(fence[1]!.trim()); } catch { /* ignore */ } }
+  const s = text.indexOf("{"), e = text.lastIndexOf("}");
+  if (s !== -1 && e > s) { try { return JSON.parse(text.slice(s, e + 1)); } catch { /* ignore */ } }
+  return {};
+}
+
 function getGeminiCli() {
   return process.env.KNOLDR_GEMINI_CLI ?? "gemini";
 }
@@ -96,7 +105,7 @@ ${linkList}
 Respond with JSON only: { "selected": [0, 3, 7, ...] } (indices of selected URLs)`;
 
   try {
-    const proc = Bun.spawn([...cliParts, "-p", prompt, "--output-format", "json"], {
+    const proc = Bun.spawn([...cliParts, "-p", prompt], {
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env },
@@ -110,7 +119,7 @@ Respond with JSON only: { "selected": [0, 3, 7, ...] } (indices of selected URLs
       return links.slice(0, maxLinks);
     }
 
-    const json = JSON.parse(stdout) as { selected?: number[] };
+    const json = extractJsonFromOutput(stdout) as { selected?: number[] };
     if (!json.selected || !Array.isArray(json.selected)) {
       return links.slice(0, maxLinks);
     }

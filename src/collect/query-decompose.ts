@@ -28,7 +28,7 @@ export async function decomposeQuery(topic: string): Promise<SubQuery[]> {
   const fullPrompt = `${SYSTEM_PROMPT}\n\n${topic}`;
   const cliParts = getGeminiCli().split(/\s+/);
 
-  const proc = Bun.spawn([...cliParts, "-p", fullPrompt, "--output-format", "json"], {
+  const proc = Bun.spawn([...cliParts, "-p", fullPrompt], {
     stdout: "pipe",
     stderr: "pipe",
     env: { ...process.env },
@@ -46,7 +46,7 @@ export async function decomposeQuery(topic: string): Promise<SubQuery[]> {
   }
 
   try {
-    const json = JSON.parse(stdout) as { queries?: SubQuery[] };
+    const json = extractJson(stdout) as { queries?: SubQuery[] };
     const queries = json.queries;
     if (!queries || !Array.isArray(queries) || queries.length === 0) {
       logger.warn("Gemini CLI returned empty queries, using fallback");
@@ -61,6 +61,15 @@ export async function decomposeQuery(topic: string): Promise<SubQuery[]> {
     logger.warn({ stdout: stdout.slice(0, 200) }, "Gemini CLI returned invalid JSON, using fallback");
     return fallbackQueries(topic);
   }
+}
+
+function extractJson(text: string): unknown {
+  try { return JSON.parse(text); } catch { /* ignore */ }
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) { try { return JSON.parse(fence[1]!.trim()); } catch { /* ignore */ } }
+  const s = text.indexOf("{"), e = text.lastIndexOf("}");
+  if (s !== -1 && e > s) { try { return JSON.parse(text.slice(s, e + 1)); } catch { /* ignore */ } }
+  throw new Error("no JSON found");
 }
 
 function fallbackQueries(topic: string): SubQuery[] {

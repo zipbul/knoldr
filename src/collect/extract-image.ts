@@ -40,7 +40,7 @@ export async function extractImage(url: string): Promise<string | null> {
     const cliParts = GEMINI_CLI.split(/\s+/);
     const prompt = `Extract all text, data, labels, and descriptions from this image. If it's a diagram, describe the structure. If it's a screenshot, extract all visible text. If it's a chart/table, extract the data. Return plain text only.`;
 
-    const proc = Bun.spawn([...cliParts, "-p", prompt, "--file", imgPath, "--output-format", "json"], {
+    const proc = Bun.spawn([...cliParts, "-p", prompt, "--file", imgPath], {
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env },

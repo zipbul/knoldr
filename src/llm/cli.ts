@@ -11,8 +11,9 @@ interface CliConfig {
 }
 
 // Use cheapest models — these are for JSON extraction, not reasoning.
-const CODEX_MODEL = process.env.KNOLDR_CODEX_MODEL ?? "o3-mini";
-const GEMINI_MODEL = process.env.KNOLDR_GEMINI_MODEL ?? "gemini-2.0-flash";
+// Codex: ChatGPT accounts only support the default model, so no override unless API key is used.
+const CODEX_MODEL = process.env.KNOLDR_CODEX_MODEL ?? "";
+const GEMINI_MODEL = process.env.KNOLDR_GEMINI_MODEL ?? "gemini-2.5-flash";
 
 function getCliConfigs(): CliConfig[] {
   const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
@@ -55,9 +56,10 @@ async function callSingleCli(cli: CliConfig, prompt: string): Promise<string> {
 async function callCodex(command: string[], model: string, prompt: string): Promise<string> {
   const tmpDir = await mkdtemp(join(tmpdir(), "knoldr-llm-"));
   const outFile = join(tmpDir, "output.txt");
+  const modelArgs = model ? ["-m", model] : [];
 
   try {
-    const proc = Bun.spawn([...command, "exec", "--skip-git-repo-check", "-m", model, "-", "-o", outFile], {
+    const proc = Bun.spawn([...command, "exec", "--skip-git-repo-check", ...modelArgs, "-", "-o", outFile], {
       stdout: "pipe",
       stderr: "pipe",
       stdin: new TextEncoder().encode(prompt),
@@ -77,7 +79,8 @@ async function callCodex(command: string[], model: string, prompt: string): Prom
 }
 
 async function callGeneric(command: string[], model: string, prompt: string): Promise<string> {
-  const proc = Bun.spawn([...command, "-m", model, "-p", prompt], {
+  const modelArgs = model ? ["-m", model] : [];
+  const proc = Bun.spawn([...command, ...modelArgs, "-p", prompt], {
     stdout: "pipe",
     stderr: "pipe",
     env: { ...process.env },

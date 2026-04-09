@@ -54,9 +54,10 @@ async function callCodexCli(rawText: string): Promise<unknown> {
     const outFile = join(tmpDir, "output.txt");
 
     try {
-      const proc = Bun.spawn(["codex", "exec", fullPrompt, "-o", outFile], {
+      const proc = Bun.spawn(["codex", "exec", "--skip-git-repo-check", "-", "-o", outFile], {
         stdout: "pipe",
         stderr: "pipe",
+        stdin: new TextEncoder().encode(fullPrompt),
         env: { ...process.env },
       });
 
@@ -171,9 +172,10 @@ export async function detectLanguage(content: string): Promise<string> {
       const tmpDir = await mkdtemp(join(tmpdir(), "knoldr-lang-"));
       const outFile = join(tmpDir, "output.txt");
       try {
-        const proc = Bun.spawn(["codex", "exec", langPrompt, "-o", outFile], {
+        const proc = Bun.spawn(["codex", "exec", "--skip-git-repo-check", "-", "-o", outFile], {
           stdout: "pipe",
           stderr: "pipe",
+          stdin: new TextEncoder().encode(langPrompt),
           env: { ...process.env },
         });
         await proc.exited;

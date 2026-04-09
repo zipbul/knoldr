@@ -922,7 +922,7 @@ knoldr/
 | `KNOLDR_API_TOKEN` | X | - | A2A Bearer token 인증. 미설정 시 open access. |
 | `KNOLDR_CODEX_CLI` | X | `codex` | Codex CLI 실행 경로 (분해용) |
 | `KNOLDR_GEMINI_CLI` | X | `gemini` | Gemini CLI 실행 경로 (리서치용) |
-| `KNOLDR_PORT` | X | `3000` | 서버 포트 |
+| `KNOLDR_PORT` | X | `5100` | 서버 포트 |
 | `KNOLDR_HOST` | X | `0.0.0.0` | 서버 바인드 주소 |
 | `KNOLDR_LOG_LEVEL` | X | `info` | 로그 레벨 (`error`, `warn`, `info`, `debug`) |
 

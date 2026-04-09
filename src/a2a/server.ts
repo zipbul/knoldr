@@ -30,7 +30,7 @@ function getTransportHandler(): JsonRpcTransportHandler {
 }
 
 export function startServer() {
-  const port = Number(process.env.KNOLDR_PORT ?? 3000);
+  const port = Number(process.env.KNOLDR_PORT ?? 5100);
   const host = process.env.KNOLDR_HOST ?? "0.0.0.0";
 
   const server = Bun.serve({

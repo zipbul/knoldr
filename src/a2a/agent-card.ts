@@ -5,7 +5,7 @@ export const agentCard: AgentCard = {
   name: "knoldr",
   description:
     "AI-native universal data platform. Stores, scores, and retrieves any type of data. All skills accept JSON input via parts[0].data = { skill, input }.",
-  url: `http://${process.env.KNOLDR_HOST ?? "0.0.0.0"}:${process.env.KNOLDR_PORT ?? "3000"}`,
+  url: `http://${process.env.KNOLDR_HOST ?? "0.0.0.0"}:${process.env.KNOLDR_PORT ?? "5100"}`,
   version: "0.2.0",
   capabilities: {
     streaming: false,
@@ -14,26 +14,6 @@ export const agentCard: AgentCard = {
   defaultInputModes: ["application/json"],
   defaultOutputModes: ["application/json"],
   skills: [
-    {
-      id: "store",
-      name: "Store",
-      tags: ["store", "ingest", "data"],
-      description: `Ingest data via atomic decomposition, dedup, authority scoring.
-
-Mode 1 (raw): input = { raw: string, sources?: [{ url, sourceType }] }
-  Raw text up to 200,000 chars. LLM decomposes into atomic entries.
-
-Mode 2 (structured): input = { entries: [{ title, content, domain[], tags[]?, language?, decayRate?, metadata? }], sources?: [{ url, sourceType }] }
-  Pre-structured entries, max 20. Skips decomposition.
-
-sourceType: official_docs | github_release | cve_db | official_blog | research_paper | established_blog | community_forum | personal_blog | ai_generated | unknown
-
-Output: { entries: [{ entryId, authority, decayRate, action: "stored"|"duplicate"|"rejected" }] }`,
-      examples: [
-        '{ "skill": "store", "input": { "raw": "Bun 1.2 released with native S3 support..." } }',
-        '{ "skill": "store", "input": { "entries": [{ "title": "Bun S3 support", "content": "Bun 1.2 adds native S3 API...", "domain": ["javascript", "cloud"] }], "sources": [{ "url": "https://bun.sh/blog", "sourceType": "official_blog" }] } }',
-      ],
-    },
     {
       id: "query",
       name: "Query",
@@ -61,33 +41,6 @@ Input: { domain?: string, tags?: string[], minAuthority?: number, minTrustLevel?
 Output: same as query.`,
       examples: [
         '{ "skill": "explore", "input": { "domain": "javascript", "sortBy": "authority", "limit": 10 } }',
-      ],
-    },
-    {
-      id: "feedback",
-      name: "Feedback",
-      tags: ["feedback", "quality", "signal"],
-      description: `Signal positive/negative on entry quality. Rate-limited (10/min per agent per entry), audit-logged.
-
-Input: { entryId: string, signal: "positive"|"negative", reason?: string }
-
-Output: { entryId, newAuthority }`,
-      examples: [
-        '{ "skill": "feedback", "input": { "entryId": "01ABC...", "signal": "positive", "reason": "verified against official docs" } }',
-      ],
-    },
-    {
-      id: "audit",
-      name: "Audit",
-      tags: ["audit", "stats", "monitoring"],
-      description: `System statistics.
-
-Input: { domain?: string }
-
-Output: { totalEntries, activeEntries, avgAuthority, ingestion: { last24h: { stored, duplicate, rejected } }, domainDistribution: { [domain]: count } }`,
-      examples: [
-        '{ "skill": "audit", "input": {} }',
-        '{ "skill": "audit", "input": { "domain": "security" } }',
       ],
     },
     {

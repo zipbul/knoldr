@@ -2,23 +2,16 @@ import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/s
 import type { Message } from "@a2a-js/sdk";
 import { v4 as uuid } from "uuid";
 import { extractSkillRequest } from "./types";
-import { handleStore } from "./handlers/store";
 import { handleQuery } from "./handlers/query";
 import { handleExplore } from "./handlers/explore";
-import { handleFeedback } from "./handlers/feedback";
-import { handleAudit } from "./handlers/audit";
 import { handleResearch } from "./handlers/research";
-import { RateLimitError } from "../score/feedback";
 import { logger } from "../observability/logger";
 
 type SkillHandler = (input: Record<string, unknown>) => Promise<unknown>;
 
 const SYNC_HANDLERS: Record<string, SkillHandler> = {
-  store: handleStore,
   query: handleQuery,
   explore: handleExplore,
-  feedback: handleFeedback,
-  audit: handleAudit,
 };
 
 function makeMessage(data: Record<string, unknown>): Message {
@@ -73,7 +66,7 @@ export class KnoldrExecutor implements AgentExecutor {
       const error = err as Error;
       logger.error({ taskId, error: error.message }, "A2A skill execution failed");
 
-      const errorCode = err instanceof RateLimitError ? 1003 : -32603;
+      const errorCode = -32603;
       eventBus.publish(
         makeMessage({ error: { code: errorCode, message: error.message } }),
       );

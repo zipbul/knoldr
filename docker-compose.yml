@@ -20,13 +20,16 @@ services:
   app:
     build: .
     ports:
-      - "${KNOLDR_PORT:-3000}:3000"
+      - "${KNOLDR_PORT:-5100}:5100"
     environment:
       DATABASE_URL: postgres://knoldr:knoldr@db:5432/knoldr
-      KNOLDR_PORT: "3000"
+      KNOLDR_PORT: "5100"
       KNOLDR_HOST: "0.0.0.0"
       KNOLDR_LOG_LEVEL: "${KNOLDR_LOG_LEVEL:-info}"
       KNOLDR_API_TOKEN: "${KNOLDR_API_TOKEN:-}"
+    volumes:
+      - knoldr-codex:/root/.codex
+      - knoldr-gemini:/root/.gemini
     depends_on:
       db:
         condition: service_healthy
@@ -54,3 +57,5 @@ services:
 
 volumes:
   knoldr-data:
+  knoldr-codex:
+  knoldr-gemini:

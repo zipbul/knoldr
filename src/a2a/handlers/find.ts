@@ -14,13 +14,6 @@ const findInputSchema = z.object({
   minTrustLevel: z.enum(["high", "medium", "low"]).optional(),
   limit: z.number().int().min(1).max(50).default(10),
   cursor: z.string().optional(),
-  // research options (used when auto-collecting)
-  maxUrls: z.number().int().min(1).max(200).default(10),
-  maxDepth: z.number().int().min(1).max(5).default(1),
-  contentTypes: z.array(z.string()).optional(),
-  focusDomains: z.array(z.string()).optional(),
-  // threshold to trigger auto-research
-  minResults: z.number().int().min(0).max(50).default(3),
 });
 
 export type FindInput = z.infer<typeof findInputSchema>;
@@ -55,24 +48,21 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
     cursor: validated.cursor,
   });
 
-  // Enough results or research disabled → return immediately
-  if (firstResult.entries.length >= validated.minResults || validated.cursor) {
+  // Enough results → return immediately
+  const MIN_RESULTS = 3;
+  if (firstResult.entries.length >= MIN_RESULTS || validated.cursor) {
     return formatResult(firstResult, false);
   }
 
   // Step 2: auto-research to collect new data
   logger.info(
-    { query: queryText, found: firstResult.entries.length, minResults: validated.minResults },
+    { query: queryText, found: firstResult.entries.length, minResults: MIN_RESULTS },
     "find: insufficient results, starting auto-research",
   );
 
   const researchResult = await research({
     topic: queryText,
     domain: validated.domain,
-    maxUrls: validated.maxUrls,
-    maxDepth: validated.maxDepth,
-    contentTypes: validated.contentTypes,
-    focusDomains: validated.focusDomains,
   });
 
   logger.info(

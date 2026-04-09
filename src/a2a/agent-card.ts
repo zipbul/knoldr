@@ -29,12 +29,7 @@ Input: {
   minAuthority?: number,   // 0-1
   minTrustLevel?: "high"|"medium"|"low",
   limit?: number,          // default 10, max 50
-  cursor?: string,         // pagination
-  minResults?: number,     // threshold to trigger auto-research (default 3)
-  maxUrls?: number,        // research: max URLs to crawl (default 10, max 200)
-  maxDepth?: number,       // research: crawl depth (default 1, max 5)
-  contentTypes?: string[], // research: ["html","pdf","image","youtube"]
-  focusDomains?: string[]  // research: prioritize these domains
+  cursor?: string          // pagination
 }
 
 Output: {
@@ -49,7 +44,6 @@ Output: {
         '{ "skill": "find", "input": { "query": "Bun performance benchmarks" } }',
         '{ "skill": "find", "input": { "query": "xz-utils vulnerability", "domain": "security", "minTrustLevel": "medium" } }',
         '{ "skill": "find", "input": { "domain": "javascript", "limit": 10 } }',
-        '{ "skill": "find", "input": { "query": "WebSocket scaling", "minResults": 5, "maxUrls": 20 } }',
       ],
     },
   ],

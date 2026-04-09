@@ -21,8 +21,6 @@ const findInputSchema = z.object({
   focusDomains: z.array(z.string()).optional(),
   // threshold to trigger auto-research
   minResults: z.number().int().min(0).max(50).default(3),
-  // skip auto-research even if results are insufficient
-  skipResearch: z.boolean().default(false),
 });
 
 export type FindInput = z.infer<typeof findInputSchema>;
@@ -58,7 +56,7 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
   });
 
   // Enough results or research disabled → return immediately
-  if (firstResult.entries.length >= validated.minResults || validated.skipResearch || validated.cursor) {
+  if (firstResult.entries.length >= validated.minResults || validated.cursor) {
     return formatResult(firstResult, false);
   }
 

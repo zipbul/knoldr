@@ -31,7 +31,6 @@ Input: {
   limit?: number,          // default 10, max 50
   cursor?: string,         // pagination
   minResults?: number,     // threshold to trigger auto-research (default 3)
-  skipResearch?: boolean,  // skip auto-research (default false)
   maxUrls?: number,        // research: max URLs to crawl (default 10, max 200)
   maxDepth?: number,       // research: crawl depth (default 1, max 5)
   contentTypes?: string[], // research: ["html","pdf","image","youtube"]

@@ -1,62 +1,112 @@
 import { logger } from "../observability/logger";
 
 const SEARCH_DELAY_MS = 2000;
-const MAX_RETRIES = 3;
-const RETRY_BACKOFF_MS = 5000;
+const MAX_RETRIES = 2;
+const RETRY_BACKOFF_MS = 3000;
 let lastSearchTime = 0;
 
-/**
- * Scrape search results from DuckDuckGo Lite.
- * No API key, no JS rendering, no CAPTCHA.
- * Returns up to ~10 URLs per query.
- */
-async function scrapeDuckDuckGoLite(query: string): Promise<string[]> {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        },
-        signal: AbortSignal.timeout(10000),
-      });
+type SearchEngine = (query: string) => Promise<string[]>;
 
-      // 202 = rate limited, retry with backoff
-      if (res.status === 202) {
-        if (attempt < MAX_RETRIES) {
-          const delay = RETRY_BACKOFF_MS * (attempt + 1);
-          logger.warn({ query, attempt, delay }, "DuckDuckGo rate limited (202), retrying");
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
+const ENGINES: { name: string; fn: SearchEngine }[] = [
+  { name: "duckduckgo", fn: scrapeDuckDuckGoLite },
+  { name: "brave", fn: scrapeBrave },
+];
+
+/**
+ * Run all search engines in parallel and merge results.
+ */
+async function searchAllEngines(query: string): Promise<string[]> {
+  const results = await Promise.allSettled(
+    ENGINES.map(async (engine) => {
+      try {
+        const urls = await engine.fn(query);
+        if (urls.length > 0) {
+          logger.debug({ engine: engine.name, query, count: urls.length }, "search engine returned results");
         }
-        logger.warn({ query }, "DuckDuckGo rate limited, exhausted retries");
+        return urls;
+      } catch (err) {
+        logger.warn({ engine: engine.name, query, error: (err as Error).message }, "search engine failed");
         return [];
       }
+    }),
+  );
 
-      if (!res.ok) return [];
+  const allUrls = new Set<string>();
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      for (const url of result.value) {
+        allUrls.add(url);
+      }
+    }
+  }
+  return [...allUrls];
+}
 
-      const html = await res.text();
+async function scrapeDuckDuckGoLite(query: string): Promise<string[]> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
 
-      // DDG Lite wraps result URLs in redirect links: //duckduckgo.com/l/?uddg=<encoded_url>
-      const matches = [...html.matchAll(/uddg=(https?%3A%2F%2F[^&"]+)/g)];
-      const urls = matches.map((m) => decodeURIComponent(m[1]!));
-
-      logger.debug({ query, resultCount: urls.length }, "DuckDuckGo Lite search scraped");
-      return urls;
-    } catch (err) {
-      logger.warn({ query, attempt, error: (err as Error).message }, "DuckDuckGo Lite scrape failed");
+    if (res.status === 202) {
       if (attempt < MAX_RETRIES) {
-        await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+        await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)));
         continue;
       }
       return [];
     }
+
+    if (!res.ok) return [];
+
+    const html = await res.text();
+    const matches = [...html.matchAll(/uddg=(https?%3A%2F%2F[^&"]+)/g)];
+    return matches.map((m) => decodeURIComponent(m[1]!));
   }
   return [];
 }
 
+async function scrapeBrave(query: string): Promise<string[]> {
+  const res = await fetch(`https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml",
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+
+  if (!res.ok) return [];
+
+  const html = await res.text();
+  const urls: string[] = [];
+  const seen = new Set<string>();
+
+  for (const m of html.matchAll(/href="(https?:\/\/(?!search\.brave\.com|brave\.com)[^"]+)"/g)) {
+    const url = m[1]!;
+    if (!isJunkUrl(url) && !seen.has(url)) {
+      seen.add(url);
+      urls.push(url);
+    }
+  }
+
+  return urls;
+}
+
+function isJunkUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host.includes("brave.com") || host.includes("google.com") ||
+      host.includes("googleapis.com") || host.includes("gstatic.com");
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Collect seed URLs from multiple search queries.
- * Uses DuckDuckGo Lite (plain HTTP, no JS, no API key).
+ * Runs DuckDuckGo + Brave in parallel per query, merges all results.
  */
 export async function collectSeedUrls(
   subQueries: Array<{ main: string; expansions: string[] }>,
@@ -73,14 +123,13 @@ export async function collectSeedUrls(
   }
 
   for (const query of queries) {
-    // Rate limit
     const elapsed = Date.now() - lastSearchTime;
     if (elapsed < SEARCH_DELAY_MS) {
       await new Promise((r) => setTimeout(r, SEARCH_DELAY_MS - elapsed));
     }
     lastSearchTime = Date.now();
 
-    const urls = await scrapeDuckDuckGoLite(query);
+    const urls = await searchAllEngines(query);
     for (const url of urls) {
       allUrls.add(url);
     }

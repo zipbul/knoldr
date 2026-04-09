@@ -1,0 +1,61 @@
+services:
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    ports:
+      - "${KNOLDR_DB_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: knoldr
+      POSTGRES_PASSWORD: knoldr
+      POSTGRES_DB: knoldr
+    volumes:
+      - knoldr-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knoldr"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "${KNOLDR_PORT:-5100}:5100"
+    environment:
+      DATABASE_URL: postgres://knoldr:knoldr@db:5432/knoldr
+      KNOLDR_PORT: "5100"
+      KNOLDR_HOST: "0.0.0.0"
+      KNOLDR_LOG_LEVEL: "${KNOLDR_LOG_LEVEL:-info}"
+      KNOLDR_API_TOKEN: "${KNOLDR_API_TOKEN:-}"
+    volumes:
+      - knoldr-codex:/root/.codex
+      - knoldr-gemini:/root/.gemini
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    ports:
+      - "${KNOLDR_TEST_DB_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: knoldr
+      POSTGRES_PASSWORD: knoldr
+      POSTGRES_DB: knoldr_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knoldr"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    profiles:
+      - test
+
+volumes:
+  knoldr-data:
+  knoldr-codex:
+  knoldr-gemini:

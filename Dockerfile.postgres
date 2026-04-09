@@ -1,0 +1,18 @@
+FROM groonga/pgroonga:latest-debian-17 AS base
+
+ARG PG_MAJOR=17
+ARG PGVECTOR_VERSION=0.8.2
+
+RUN apt-get update && \
+    apt-mark hold locales && \
+    apt-get install -y --no-install-recommends build-essential postgresql-server-dev-$PG_MAJOR ca-certificates curl && \
+    curl -fsSL https://github.com/pgvector/pgvector/archive/refs/tags/v${PGVECTOR_VERSION}.tar.gz | tar xz -C /tmp && \
+    cd /tmp/pgvector-${PGVECTOR_VERSION} && \
+    make clean && \
+    make OPTFLAGS="" && \
+    make install && \
+    rm -rf /tmp/pgvector-${PGVECTOR_VERSION} && \
+    apt-get remove -y build-essential postgresql-server-dev-$PG_MAJOR ca-certificates curl && \
+    apt-get autoremove -y && \
+    apt-mark unhold locales && \
+    rm -rf /var/lib/apt/lists/*

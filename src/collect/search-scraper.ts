@@ -1,3 +1,4 @@
+import { callLlm, extractJson } from "../llm/cli";
 import { logger } from "../observability/logger";
 
 const SEARCH_DELAY_MS = 2000;
@@ -5,27 +6,28 @@ const MAX_RETRIES = 2;
 const RETRY_BACKOFF_MS = 3000;
 let lastSearchTime = 0;
 
-type SearchEngine = (query: string) => Promise<string[]>;
+type UrlSource = (query: string) => Promise<string[]>;
 
-const ENGINES: { name: string; fn: SearchEngine }[] = [
+const SOURCES: { name: string; fn: UrlSource }[] = [
+  { name: "llm", fn: llmSuggestUrls },
   { name: "duckduckgo", fn: scrapeDuckDuckGoLite },
   { name: "brave", fn: scrapeBrave },
 ];
 
 /**
- * Run all search engines in parallel and merge results.
+ * Run all URL sources in parallel and merge results.
  */
-async function searchAllEngines(query: string): Promise<string[]> {
+async function collectFromAllSources(query: string): Promise<string[]> {
   const results = await Promise.allSettled(
-    ENGINES.map(async (engine) => {
+    SOURCES.map(async (source) => {
       try {
-        const urls = await engine.fn(query);
+        const urls = await source.fn(query);
         if (urls.length > 0) {
-          logger.debug({ engine: engine.name, query, count: urls.length }, "search engine returned results");
+          logger.debug({ source: source.name, query, count: urls.length }, "URL source returned results");
         }
         return urls;
       } catch (err) {
-        logger.warn({ engine: engine.name, query, error: (err as Error).message }, "search engine failed");
+        logger.warn({ source: source.name, query, error: (err as Error).message }, "URL source failed");
         return [];
       }
     }),
@@ -40,6 +42,26 @@ async function searchAllEngines(query: string): Promise<string[]> {
     }
   }
   return [...allUrls];
+}
+
+/**
+ * Ask LLM to suggest authoritative URLs for a topic.
+ */
+async function llmSuggestUrls(query: string): Promise<string[]> {
+  const prompt = `List 5-10 real, authoritative URLs where I can find information about: "${query}"
+
+Include official docs, research papers, reputable blogs, and GitHub repos.
+Only include URLs you are confident actually exist.
+
+Respond with JSON only: { "urls": ["https://...", ...] }`;
+
+  const output = await callLlm(prompt);
+  const json = extractJson(output) as { urls?: string[] };
+  if (!json.urls || !Array.isArray(json.urls)) return [];
+
+  return json.urls
+    .filter((u): u is string => typeof u === "string" && u.startsWith("https://"))
+    .slice(0, 10);
 }
 
 async function scrapeDuckDuckGoLite(query: string): Promise<string[]> {
@@ -106,7 +128,7 @@ function isJunkUrl(url: string): boolean {
 
 /**
  * Collect seed URLs from multiple search queries.
- * Runs DuckDuckGo + Brave in parallel per query, merges all results.
+ * Runs LLM + DuckDuckGo + Brave in parallel per query, merges all results.
  */
 export async function collectSeedUrls(
   subQueries: Array<{ main: string; expansions: string[] }>,
@@ -129,7 +151,7 @@ export async function collectSeedUrls(
     }
     lastSearchTime = Date.now();
 
-    const urls = await searchAllEngines(query);
+    const urls = await collectFromAllSources(query);
     for (const url of urls) {
       allUrls.add(url);
     }

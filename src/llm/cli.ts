@@ -6,16 +6,21 @@ import { tmpdir } from "os";
 interface CliConfig {
   name: string;
   command: string[];
+  model: string;
   mode: "codex" | "generic"; // codex uses -o file + stdin, generic uses -p + stdout
 }
+
+// Use cheapest models — these are for JSON extraction, not reasoning.
+const CODEX_MODEL = process.env.KNOLDR_CODEX_MODEL ?? "o3-mini";
+const GEMINI_MODEL = process.env.KNOLDR_GEMINI_MODEL ?? "gemini-2.0-flash";
 
 function getCliConfigs(): CliConfig[] {
   const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
   const geminiCli = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
 
   return [
-    { name: "codex", command: codexCli.split(/\s+/), mode: "codex" },
-    { name: "gemini", command: geminiCli.split(/\s+/), mode: "generic" },
+    { name: "codex", command: codexCli.split(/\s+/), model: CODEX_MODEL, mode: "codex" },
+    { name: "gemini", command: geminiCli.split(/\s+/), model: GEMINI_MODEL, mode: "generic" },
   ];
 }
 
@@ -42,17 +47,17 @@ export async function callLlm(prompt: string): Promise<string> {
 
 async function callSingleCli(cli: CliConfig, prompt: string): Promise<string> {
   if (cli.mode === "codex") {
-    return callCodex(cli.command, prompt);
+    return callCodex(cli.command, cli.model, prompt);
   }
-  return callGeneric(cli.command, prompt);
+  return callGeneric(cli.command, cli.model, prompt);
 }
 
-async function callCodex(command: string[], prompt: string): Promise<string> {
+async function callCodex(command: string[], model: string, prompt: string): Promise<string> {
   const tmpDir = await mkdtemp(join(tmpdir(), "knoldr-llm-"));
   const outFile = join(tmpDir, "output.txt");
 
   try {
-    const proc = Bun.spawn([...command, "exec", "--skip-git-repo-check", "-", "-o", outFile], {
+    const proc = Bun.spawn([...command, "exec", "--skip-git-repo-check", "-m", model, "-", "-o", outFile], {
       stdout: "pipe",
       stderr: "pipe",
       stdin: new TextEncoder().encode(prompt),
@@ -71,8 +76,8 @@ async function callCodex(command: string[], prompt: string): Promise<string> {
   }
 }
 
-async function callGeneric(command: string[], prompt: string): Promise<string> {
-  const proc = Bun.spawn([...command, "-p", prompt], {
+async function callGeneric(command: string[], model: string, prompt: string): Promise<string> {
+  const proc = Bun.spawn([...command, "-m", model, "-p", prompt], {
     stdout: "pipe",
     stderr: "pipe",
     env: { ...process.env },

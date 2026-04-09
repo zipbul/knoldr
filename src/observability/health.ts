@@ -16,15 +16,12 @@ export async function getHealthStatus() {
     dbStatus = "down";
   }
 
-  // LLM: Codex CLI subprocess — check if binary exists on PATH
-  let llmApiStatus = "unconfigured";
-  try {
-    const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
-    const which = Bun.spawnSync(["which", codexCli]);
-    llmApiStatus = which.exitCode === 0 ? "up" : "down";
-  } catch {
-    llmApiStatus = "down";
-  }
+  // LLM: check if at least one CLI binary exists on PATH
+  const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
+  const geminiCli = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
+  const codexOk = Bun.spawnSync(["which", codexCli]).exitCode === 0;
+  const geminiOk = Bun.spawnSync(["which", geminiCli]).exitCode === 0;
+  const llmApiStatus = codexOk || geminiOk ? "up" : "down";
   return {
     db: dbStatus,
     llmApi: llmApiStatus,

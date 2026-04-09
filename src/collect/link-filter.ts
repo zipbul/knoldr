@@ -1,17 +1,5 @@
+import { callLlm, extractJson } from "../llm/cli";
 import { logger } from "../observability/logger";
-
-function extractJsonFromOutput(text: string): unknown {
-  try { return JSON.parse(text); } catch { /* ignore */ }
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) { try { return JSON.parse(fence[1]!.trim()); } catch { /* ignore */ } }
-  const s = text.indexOf("{"), e = text.lastIndexOf("}");
-  if (s !== -1 && e > s) { try { return JSON.parse(text.slice(s, e + 1)); } catch { /* ignore */ } }
-  return {};
-}
-
-function getGeminiCli() {
-  return process.env.KNOLDR_GEMINI_CLI ?? "gemini";
-}
 
 // Extensions to always skip
 const SKIP_EXTENSIONS = new Set([
@@ -93,7 +81,6 @@ export async function llmSelectLinks(
   if (links.length === 0) return [];
   if (links.length <= maxLinks) return links;
 
-  const cliParts = getGeminiCli().split(/\s+/);
   const linkList = links.map((l, i) => `${i}: ${l}`).join("\n");
   const prompt = `You are a link relevance filter. Given a research topic and a list of URLs, select the ${maxLinks} URLs most likely to contain useful information about the topic.
 
@@ -105,21 +92,8 @@ ${linkList}
 Respond with JSON only: { "selected": [0, 3, 7, ...] } (indices of selected URLs)`;
 
   try {
-    const proc = Bun.spawn([...cliParts, "-p", prompt], {
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env },
-    });
-
-    const stdout = await new Response(proc.stdout).text();
-    const exitCode = await proc.exited;
-
-    if (exitCode !== 0) {
-      // Fallback: return first N
-      return links.slice(0, maxLinks);
-    }
-
-    const json = extractJsonFromOutput(stdout) as { selected?: number[] };
+    const output = await callLlm(prompt);
+    const json = extractJson(output) as { selected?: number[] };
     if (!json.selected || !Array.isArray(json.selected)) {
       return links.slice(0, maxLinks);
     }

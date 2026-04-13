@@ -919,6 +919,7 @@ knoldr/
 | 변수 | 필수 | 기본값 | 설명 |
 |------|:----:|--------|------|
 | `DATABASE_URL` | O | - | PostgreSQL 연결 문자열 (e.g., `postgres://user:pass@host:5432/knoldr`) |
+| `LANGSEARCH_API_KEY` | O | - | LangSearch web search API key (https://langsearch.com/dashboard) |
 | `KNOLDR_API_TOKEN` | X | - | A2A Bearer token 인증. 미설정 시 open access. |
 | `KNOLDR_CODEX_CLI` | X | `codex` | Codex CLI 실행 경로 (분해용) |
 | `KNOLDR_GEMINI_CLI` | X | `gemini` | Gemini CLI 실행 경로 (리서치용) |
@@ -926,7 +927,7 @@ knoldr/
 | `KNOLDR_HOST` | X | `0.0.0.0` | 서버 바인드 주소 |
 | `KNOLDR_LOG_LEVEL` | X | `info` | 로그 레벨 (`error`, `warn`, `info`, `debug`) |
 
-웹 검색은 DuckDuckGo Lite HTTP scraping (API key 불필요), 임베딩은 로컬 @huggingface/transformers (API key 불필요), YouTube 자막은 innertube scraping (API key 불필요).
+웹 검색은 LangSearch API, 임베딩은 로컬 @huggingface/transformers (API key 불필요), YouTube 자막은 innertube scraping (API key 불필요).
 
 ### CLI Specification — 구현 완료 (`src/cli/index.ts`, `knoldr --help`)
 

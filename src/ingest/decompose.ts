@@ -59,8 +59,41 @@ export async function decompose(rawText: string): Promise<DecomposeResponse> {
   }
 }
 
+/**
+ * Sanitize LLM output before zod validation.
+ * LLMs frequently generate tags/domains with underscores, spaces, or special chars.
+ */
+function sanitizeLlmOutput(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.entries)) return raw;
+
+  obj.entries = (obj.entries as Record<string, unknown>[]).slice(0, 20).map((entry) => {
+    if (Array.isArray(entry.domain)) {
+      entry.domain = entry.domain.map(normalizeSlug).filter(Boolean).slice(0, 5);
+    }
+    if (Array.isArray(entry.tags)) {
+      entry.tags = entry.tags.map(normalizeSlug).filter(Boolean).slice(0, 20);
+    }
+    return entry;
+  });
+
+  return obj;
+}
+
+function normalizeSlug(s: unknown): string {
+  if (typeof s !== "string") return "";
+  return s
+    .toLowerCase()
+    .replace(/[_\s.]+/g, "-")    // underscores, spaces, dots → hyphens
+    .replace(/[^a-z0-9-]/g, "")  // strip anything else
+    .replace(/-{2,}/g, "-")      // collapse multiple hyphens
+    .replace(/^-|-$/g, "");      // trim leading/trailing hyphens
+}
+
 function validateDecomposeResponse(raw: unknown): DecomposeResponse {
-  const parsed = decomposeResponseSchema.parse(raw);
+  const sanitized = sanitizeLlmOutput(raw);
+  const parsed = decomposeResponseSchema.parse(sanitized);
   if (parsed.entries.length > 20) {
     logger.warn({ count: parsed.entries.length }, "decompose returned >20 entries, truncating");
     parsed.entries = parsed.entries.slice(0, 20);

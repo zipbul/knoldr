@@ -27,6 +27,7 @@ services:
       KNOLDR_HOST: "0.0.0.0"
       KNOLDR_LOG_LEVEL: "${KNOLDR_LOG_LEVEL:-info}"
       KNOLDR_API_TOKEN: "${KNOLDR_API_TOKEN:-}"
+      LANGSEARCH_API_KEY: "${LANGSEARCH_API_KEY:-}"
     volumes:
       - knoldr-codex:/root/.codex
       - knoldr-gemini:/root/.gemini

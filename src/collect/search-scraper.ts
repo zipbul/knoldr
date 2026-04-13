@@ -1,168 +1,59 @@
 import { logger } from "../observability/logger";
 
-const SEARCH_DELAY_MS = 1500;
+const LANGSEARCH_ENDPOINT = "https://api.langsearch.com/v1/web-search";
+const SEARCH_DELAY_MS = 500;
 let lastSearchTime = 0;
 
-interface SearchEngine {
-  name: string;
-  url: (query: string) => string;
-  /** CSS selector or regex to extract result URLs from rendered page */
-  extract: (html: string) => string[];
-}
-
-const ENGINES: SearchEngine[] = [
-  {
-    name: "google",
-    url: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&num=10&hl=en`,
-    extract: (html) => {
-      const urls: string[] = [];
-      // Google result links: /url?q=... or direct href in result containers
-      for (const m of html.matchAll(/\/url\?q=(https?:\/\/[^&"]+)/g)) {
-        urls.push(decodeURIComponent(m[1]!));
-      }
-      // Also try direct hrefs (newer Google layouts)
-      for (const m of html.matchAll(/href="(https?:\/\/(?!www\.google\.|accounts\.google\.|maps\.google\.|support\.google\.|policies\.google\.)[^"]+)"/g)) {
-        urls.push(m[1]!);
-      }
-      return urls;
-    },
-  },
-  {
-    name: "bing",
-    url: (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=10`,
-    extract: (html) => {
-      const urls: string[] = [];
-      // Bing organic results use <a href="..."> inside <li class="b_algo">
-      for (const m of html.matchAll(/href="(https?:\/\/(?!www\.bing\.com|login\.microsoftonline|go\.microsoft\.com)[^"]+)"/g)) {
-        urls.push(m[1]!);
-      }
-      return urls;
-    },
-  },
-  {
-    name: "duckduckgo",
-    url: (q) => `https://duckduckgo.com/?q=${encodeURIComponent(q)}`,
-    extract: (html) => {
-      const urls: string[] = [];
-      // DDG result links: uddg= redirect or data-href
-      for (const m of html.matchAll(/uddg=(https?%3A%2F%2F[^&"]+)/g)) {
-        urls.push(decodeURIComponent(m[1]!));
-      }
-      for (const m of html.matchAll(/href="(https?:\/\/(?!duckduckgo\.com|duck\.com)[^"]+)"/g)) {
-        urls.push(m[1]!);
-      }
-      return urls;
-    },
-  },
-  {
-    name: "brave",
-    url: (q) => `https://search.brave.com/search?q=${encodeURIComponent(q)}&source=web`,
-    extract: (html) => {
-      const urls: string[] = [];
-      for (const m of html.matchAll(/href="(https?:\/\/(?!search\.brave\.com|brave\.com)[^"]+)"/g)) {
-        urls.push(m[1]!);
-      }
-      return urls;
-    },
-  },
-  {
-    name: "yahoo",
-    url: (q) => `https://search.yahoo.com/search?p=${encodeURIComponent(q)}&n=10`,
-    extract: (html) => {
-      const urls: string[] = [];
-      // Yahoo wraps results in RU= redirect URLs
-      for (const m of html.matchAll(/RU=(https?%3A%2F%2F[^/&"]+[^"]*)/g)) {
-        urls.push(decodeURIComponent(m[1]!));
-      }
-      for (const m of html.matchAll(/href="(https?:\/\/(?!search\.yahoo\.com|login\.yahoo\.com|yahoo\.com\/)[^"]+)"/g)) {
-        urls.push(m[1]!);
-      }
-      return urls;
-    },
-  },
-  {
-    name: "yandex",
-    url: (q) => `https://yandex.com/search/?text=${encodeURIComponent(q)}&lr=84`,
-    extract: (html) => {
-      const urls: string[] = [];
-      for (const m of html.matchAll(/href="(https?:\/\/(?!yandex\.|ya\.ru)[^"]+)"/g)) {
-        urls.push(m[1]!);
-      }
-      return urls;
-    },
-  },
-];
-
-const JUNK_HOSTS = new Set([
-  "accounts.google.com", "support.google.com", "policies.google.com",
-  "maps.google.com", "play.google.com", "translate.google.com",
-  "login.microsoftonline.com", "go.microsoft.com",
-  "login.yahoo.com", "mail.yahoo.com",
-]);
-
-function isJunkUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    if (JUNK_HOSTS.has(u.hostname)) return true;
-    // Skip common non-content extensions
-    if (/\.(css|js|png|jpg|gif|svg|ico|woff2?)$/i.test(u.pathname)) return true;
-    return false;
-  } catch {
-    return true;
-  }
+interface LangSearchResponse {
+  data?: {
+    webPages?: {
+      value?: Array<{ url?: string }>;
+    };
+  };
 }
 
 /**
- * Search all engines in parallel using Playwright, merge results.
+ * Query LangSearch web search API.
+ * Returns up to 10 high-quality URLs per query.
  */
-async function searchAllEngines(query: string): Promise<string[]> {
-  const { chromium } = await import("playwright");
-  const browser = await chromium.launch({ headless: true });
+async function queryLangSearch(query: string): Promise<string[]> {
+  const apiKey = process.env.LANGSEARCH_API_KEY;
+  if (!apiKey) {
+    logger.error("LANGSEARCH_API_KEY not configured");
+    return [];
+  }
 
   try {
-    const results = await Promise.allSettled(
-      ENGINES.map(async (engine) => {
-        const context = await browser.newContext({
-          userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        });
-        const page = await context.newPage();
+    const res = await fetch(LANGSEARCH_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, count: 10 }),
+      signal: AbortSignal.timeout(15000),
+    });
 
-        try {
-          await page.goto(engine.url(query), { waitUntil: "domcontentloaded", timeout: 15000 });
-          // Give JS time to render results
-          await page.waitForTimeout(2000);
-          const html = await page.content();
-          const urls = engine.extract(html).filter((u) => !isJunkUrl(u));
-          if (urls.length > 0) {
-            logger.debug({ engine: engine.name, query, count: urls.length }, "search engine returned results");
-          }
-          return urls;
-        } catch (err) {
-          logger.warn({ engine: engine.name, query, error: (err as Error).message }, "search engine failed");
-          return [];
-        } finally {
-          await context.close();
-        }
-      }),
-    );
-
-    const allUrls = new Set<string>();
-    for (const result of results) {
-      if (result.status === "fulfilled") {
-        for (const url of result.value) {
-          allUrls.add(url);
-        }
-      }
+    if (!res.ok) {
+      logger.warn({ query, status: res.status }, "LangSearch returned non-OK");
+      return [];
     }
-    return [...allUrls];
-  } finally {
-    await browser.close();
+
+    const json = (await res.json()) as LangSearchResponse;
+    const urls = (json.data?.webPages?.value ?? [])
+      .map((p) => p.url ?? "")
+      .filter((u) => u.startsWith("http"));
+
+    logger.debug({ query, count: urls.length }, "LangSearch returned results");
+    return urls;
+  } catch (err) {
+    logger.warn({ query, error: (err as Error).message }, "LangSearch request failed");
+    return [];
   }
 }
 
 /**
- * Collect seed URLs from multiple search queries.
- * Runs Google, Bing, DuckDuckGo, Brave, Yahoo, Yandex in parallel via Playwright.
+ * Collect seed URLs from multiple search queries via LangSearch.
  */
 export async function collectSeedUrls(
   subQueries: Array<{ main: string; expansions: string[] }>,
@@ -185,7 +76,7 @@ export async function collectSeedUrls(
     }
     lastSearchTime = Date.now();
 
-    const urls = await searchAllEngines(query);
+    const urls = await queryLangSearch(query);
     for (const url of urls) {
       allUrls.add(url);
     }

@@ -84,7 +84,6 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
       urlsProcessed: researchResult.urlsProcessed,
       entriesStored: researchResult.entriesStored,
       entriesSkippedLowRelevance: researchResult.entriesSkippedLowRelevance,
-      entriesWithPublishedAt: researchResult.entriesWithPublishedAt,
     },
     "find: auto-research completed",
   );
@@ -104,7 +103,6 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
     urlsProcessed: researchResult.urlsProcessed,
     entriesStored: researchResult.entriesStored,
     entriesSkippedLowRelevance: researchResult.entriesSkippedLowRelevance,
-    entriesWithPublishedAt: researchResult.entriesWithPublishedAt,
   });
 }
 
@@ -112,7 +110,6 @@ interface ResearchStats {
   urlsProcessed: number;
   entriesStored: number;
   entriesSkippedLowRelevance: number;
-  entriesWithPublishedAt: number;
 }
 
 function formatResult(

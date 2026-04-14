@@ -7,9 +7,10 @@ let lastSearchTime = 0;
 export interface SearchHit {
   url: string;
   title: string;
-  summary: string;
-  publishedAt?: string;
-  siteName?: string;
+  // May be up to tens of KB — LangSearch's `summary` is effectively the
+  // extracted article text, not a short preview. Falls back to `snippet`
+  // (~200 chars) when `summary` is missing.
+  content: string;
 }
 
 interface LangSearchResponse {
@@ -20,8 +21,6 @@ interface LangSearchResponse {
         name?: string;
         snippet?: string;
         summary?: string;
-        datePublished?: string;
-        siteName?: string;
       }>;
     };
   };
@@ -41,7 +40,7 @@ async function queryLangSearch(query: string): Promise<SearchHit[]> {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query, count: 10, summary: true }),
+      body: JSON.stringify({ query, count: 10 }),
       signal: AbortSignal.timeout(15000),
     });
 
@@ -55,14 +54,12 @@ async function queryLangSearch(query: string): Promise<SearchHit[]> {
     for (const p of json.data?.webPages?.value ?? []) {
       if (!p.url || !p.url.startsWith("http")) continue;
       const title = (p.name ?? "").trim();
-      const summary = (p.summary ?? p.snippet ?? "").trim();
-      if (!title && !summary) continue;
+      const content = (p.summary ?? p.snippet ?? "").trim();
+      if (!title && !content) continue;
       hits.push({
         url: p.url,
         title: title || p.url,
-        summary,
-        publishedAt: normalizeDate(p.datePublished),
-        siteName: p.siteName?.trim() || undefined,
+        content,
       });
     }
 
@@ -72,12 +69,6 @@ async function queryLangSearch(query: string): Promise<SearchHit[]> {
     logger.warn({ query, error: (err as Error).message }, "LangSearch request failed");
     return [];
   }
-}
-
-function normalizeDate(raw?: string): string | undefined {
-  if (!raw) return undefined;
-  const d = new Date(raw);
-  return isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
 /**

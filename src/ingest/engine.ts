@@ -11,7 +11,6 @@ import { ingestionTotal, ingestionLatency } from "../observability/metrics";
 import {
   type StoreInput,
   type Source,
-  type SourceMetadata,
   type StructuredEntry,
   isRawInput,
   stripHtml,
@@ -32,9 +31,6 @@ export interface IngestResult {
 export async function ingest(input: StoreInput): Promise<IngestResult[]> {
   const timer = ingestionLatency.startTimer();
   const sources: Source[] = input.sources ?? [];
-  const sourceMetadata: SourceMetadata | undefined = isRawInput(input)
-    ? input.sourceMetadata
-    : undefined;
   const results: IngestResult[] = [];
 
   let decomposedEntries: StructuredEntry[];
@@ -84,7 +80,7 @@ export async function ingest(input: StoreInput): Promise<IngestResult[]> {
   // Process each entry through the pipeline
   for (const decomposed of decomposedEntries) {
     try {
-      const result = await processEntry(decomposed, sources, sourceMetadata);
+      const result = await processEntry(decomposed, sources);
       results.push(result);
     } catch (err) {
       const errorMsg = (err as Error).message;
@@ -105,7 +101,6 @@ export async function ingest(input: StoreInput): Promise<IngestResult[]> {
 async function processEntry(
   decomposed: StructuredEntry,
   sources: Source[],
-  sourceMetadata: SourceMetadata | undefined,
 ): Promise<IngestResult> {
   const id = ulid();
   const createdAt = new Date(decodeUlidTimestamp(id));
@@ -115,10 +110,7 @@ async function processEntry(
   const tags = decomposed.tags ?? [];
   const language = decomposed.language ?? (await detectLanguage(content));
   const decayRate = decomposed.decayRate ?? 0.01;
-  const mergedMetadata: Record<string, unknown> | null = mergeMetadata(
-    decomposed.metadata,
-    sourceMetadata,
-  );
+  const mergedMetadata = normalizeMetadata(decomposed.metadata);
 
   // Step 3: Generate embedding
   const embeddingText = buildEmbeddingInput(title, content);
@@ -200,13 +192,9 @@ async function processEntry(
   return { entryId: id, authority, decayRate, action: "stored" };
 }
 
-function mergeMetadata(
-  decomposedMetadata: Record<string, unknown> | undefined,
-  sourceMetadata: SourceMetadata | undefined,
+function normalizeMetadata(
+  metadata: Record<string, unknown> | undefined,
 ): Record<string, unknown> | null {
-  const merged: Record<string, unknown> = { ...(decomposedMetadata ?? {}) };
-  if (sourceMetadata?.publishedAt) merged.publishedAt = sourceMetadata.publishedAt;
-  if (sourceMetadata?.siteName) merged.siteName = sourceMetadata.siteName;
-  if (sourceMetadata?.author) merged.author = sourceMetadata.author;
-  return Object.keys(merged).length > 0 ? merged : null;
+  if (!metadata) return null;
+  return Object.keys(metadata).length > 0 ? metadata : null;
 }

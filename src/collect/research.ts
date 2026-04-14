@@ -16,7 +16,6 @@ export interface ResearchResult {
   urlsProcessed: number;
   entriesStored: number;
   entriesSkippedLowRelevance: number;
-  entriesWithPublishedAt: number;
   status: "completed" | "partial";
 }
 
@@ -59,7 +58,6 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
     urlsProcessed: 0,
     entriesStored: 0,
     entriesSkippedLowRelevance: 0,
-    entriesWithPublishedAt: 0,
     status: "completed",
   };
 
@@ -80,18 +78,11 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
       const storeInput = parseStoreInput({
         raw: buildRawText(hit).slice(0, 200_000),
         sources: [{ url: hit.url, sourceType: estimateSourceType(hit.url) }],
-        sourceMetadata: {
-          ...(hit.publishedAt ? { publishedAt: hit.publishedAt } : {}),
-          ...(hit.siteName ? { siteName: hit.siteName } : {}),
-        },
       });
       const ingested = await ingest(storeInput);
       for (const r of ingested) {
         result.entries.push({ entryId: r.entryId, action: r.action });
-        if (r.action === "stored") {
-          result.entriesStored++;
-          if (hit.publishedAt) result.entriesWithPublishedAt++;
-        }
+        if (r.action === "stored") result.entriesStored++;
       }
     } catch (err) {
       logger.warn({ url: hit.url, error: (err as Error).message }, "ingest failed for hit");
@@ -104,7 +95,6 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
       urlsProcessed: result.urlsProcessed,
       entriesStored: result.entriesStored,
       entriesSkippedLowRelevance: result.entriesSkippedLowRelevance,
-      entriesWithPublishedAt: result.entriesWithPublishedAt,
       status: result.status,
     },
     "LangSearch research finished",
@@ -114,17 +104,12 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
 }
 
 function buildRawText(hit: SearchHit): string {
-  const parts: string[] = [];
-  if (hit.title) parts.push(hit.title);
-  if (hit.siteName) parts.push(`(${hit.siteName})`);
-  if (hit.publishedAt) parts.push(`Published: ${hit.publishedAt}`);
-  if (hit.summary) parts.push("", hit.summary);
-  return parts.join("\n");
+  return hit.content ? `${hit.title}\n\n${hit.content}` : hit.title;
 }
 
 function passesTopicGate(hit: SearchHit, topicTerms: string[]): boolean {
   if (topicTerms.length === 0) return true;
-  const haystack = `${hit.title} ${hit.summary}`.toLowerCase();
+  const haystack = `${hit.title} ${hit.content}`.toLowerCase();
   const matched = topicTerms.filter((t) => haystack.includes(t)).length;
   return matched / topicTerms.length >= MIN_TOPIC_COVERAGE;
 }

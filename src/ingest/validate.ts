@@ -20,21 +20,10 @@ const sourceSchema = z.object({
 
 export type Source = z.infer<typeof sourceSchema>;
 
-// -- Source metadata carried alongside raw ingest (e.g., publication date from
-// search result). Merged into each decomposed entry's metadata JSONB column.
-const sourceMetadataSchema = z.object({
-  publishedAt: z.iso.datetime().optional(),
-  siteName: z.string().max(200).optional(),
-  author: z.string().max(200).optional(),
-});
-
-export type SourceMetadata = z.infer<typeof sourceMetadataSchema>;
-
 // -- Mode 1: raw input
 const rawStoreSchema = z.object({
   raw: z.string().min(1).max(200_000),
   sources: z.array(sourceSchema).max(20).optional(),
-  sourceMetadata: sourceMetadataSchema.optional(),
 });
 
 // -- Mode 2: structured input

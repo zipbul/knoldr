@@ -46,5 +46,30 @@ Output: {
         '{ "skill": "find", "input": { "domain": "javascript", "limit": 10 } }',
       ],
     },
+    {
+      id: "feedback",
+      name: "Feedback",
+      tags: ["feedback", "rating", "authority", "rerank"],
+      description: `Record a positive or negative signal against a stored entry. Atomically adjusts the entry's authority score so future \`find\` rankings reflect usage quality.
+
+Input: {
+  entryId: string,            // entry.id returned from find
+  signal: "positive"|"negative",
+  reason?: string,            // freeform, max 1000 chars
+  agentId: string             // stable identifier for the caller
+}
+
+Rate limits:
+  - 1 feedback per (agentId, entryId) per hour
+  - 10 feedbacks per entry per hour (any agent)
+
+Output:
+  { ok: true,  entryId, newAuthority }
+  { ok: false, error: "rate_limited"|"not_found"|"invalid_input", message }`,
+      examples: [
+        '{ "skill": "feedback", "input": { "entryId": "01HX...", "signal": "positive", "agentId": "agent-42" } }',
+        '{ "skill": "feedback", "input": { "entryId": "01HX...", "signal": "negative", "reason": "outdated", "agentId": "agent-42" } }',
+      ],
+    },
   ],
 };

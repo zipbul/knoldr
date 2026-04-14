@@ -130,40 +130,39 @@ export function startServer() {
     }
   }, 5 * 60 * 1000);
 
-  // Claim extraction worker — every 15 seconds, batch=6
+  // Claim extraction worker — every 60 seconds, batch=3
   // Picks recently stored entries without claims and extracts them
   // serially. Separated from ingest so bursty research doesn't spawn
-  // dozens of concurrent LLM CLI subprocesses.
+  // dozens of concurrent LLM CLI subprocesses. Cadence is deliberately
+  // slower than ingest burst rate — OpenAI/Gemini OAuth free tiers
+  // exhaust quickly otherwise.
   setInterval(async () => {
     try {
       const { processClaimExtractionQueue } = await import("../claim/extract-queue");
-      await processClaimExtractionQueue(6);
+      await processClaimExtractionQueue(3);
     } catch (err) {
       logger.error({ error: (err as Error).message }, "claim extraction worker failed");
     }
-  }, 15 * 1000);
+  }, 60 * 1000);
 
-  // KG triple extraction worker — every 30 seconds, batch=6
-  // Picks verified factual claims without kg_relation rows and extracts
-  // (subject, predicate, object) triples. Runs after verify_queue so
-  // only evidence-backed assertions populate the graph.
+  // KG triple extraction worker — every 120 seconds, batch=3
   setInterval(async () => {
     try {
       const { processKgExtractionQueue } = await import("../kg/extract-queue");
-      await processKgExtractionQueue(6);
+      await processKgExtractionQueue(3);
     } catch (err) {
       logger.error({ error: (err as Error).message }, "KG extraction worker failed");
     }
-  }, 30 * 1000);
+  }, 120 * 1000);
 
-  // Claim verify queue processor — every 45 seconds, batch=10
+  // Claim verify queue processor — every 90 seconds, batch=5
   // Pulls a small batch of factual claims, adjudicates via db_cross_ref +
   // LLM judgment (see src/claim/verify.ts), updates verdict/certainty,
   // and bumps entry.factuality.
   setInterval(async () => {
     try {
       const { processVerifyQueue, updateFactualityScore } = await import("../claim/verify");
-      const processed = await processVerifyQueue(10);
+      const processed = await processVerifyQueue(5);
       if (processed > 0) {
         // Recompute factuality for entries touched by this batch.
         const { db } = await import("../db/connection");
@@ -183,7 +182,7 @@ export function startServer() {
     } catch (err) {
       logger.error({ error: (err as Error).message }, "verify queue processing failed");
     }
-  }, 45 * 1000);
+  }, 90 * 1000);
 
   logger.info({ port, host }, "knoldr A2A server started");
   return server;

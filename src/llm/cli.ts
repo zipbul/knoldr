@@ -10,10 +10,19 @@ interface CliConfig {
   mode: "codex" | "generic"; // codex uses -o file + stdin, generic uses -p + stdout
 }
 
-// Use cheapest models — these are for JSON extraction, not reasoning.
-// Codex: ChatGPT accounts only support the default model, so no override unless API key is used.
-const CODEX_MODEL = process.env.KNOLDR_CODEX_MODEL ?? "";
-const GEMINI_MODEL = process.env.KNOLDR_GEMINI_MODEL ?? "gemini-2.5-flash";
+// Verified by direct probe against live CLIs:
+//
+// - Codex v0.120.0 on a ChatGPT Plus OAuth session accepts only the
+//   plan's default tier (`gpt-5`/`gpt-5.4`). Every cheaper model
+//   (`gpt-5-mini`, `gpt-4o-mini`, `o4-mini`, ...) is rejected with
+//   `"not supported when using Codex with a ChatGPT account"`. So
+//   leave the model empty and let codex pick its own default.
+// - Gemini CLI v0.37.2 accepts `gemini-2.5-flash-lite` as a live
+//   model with its own quota bucket (separate from `gemini-2.5-flash`,
+//   which we exhausted earlier). Flash-lite is also the right pick for
+//   structured-JSON extraction workload knoldr runs.
+const CODEX_MODEL = "";
+const GEMINI_MODEL = "gemini-2.5-flash-lite";
 
 function getCliConfigs(): CliConfig[] {
   const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
@@ -25,6 +34,43 @@ function getCliConfigs(): CliConfig[] {
   ];
 }
 
+// ---- Quota circuit breaker ----
+// When a CLI returns "usage limit" / "QUOTA_EXHAUSTED" etc. there is no
+// point retrying for hours. We remember the outage per-CLI and skip
+// calls until the cooldown elapses.
+const CIRCUIT_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+const QUOTA_SIGNALS = [
+  "usage limit",
+  "quota",
+  "rate limit",
+  "quota_exhausted",
+  "terminalquotaerror",
+  "resource has been exhausted",
+];
+
+const unhealthyUntil = new Map<string, number>();
+
+function isCliHealthy(name: string): boolean {
+  const until = unhealthyUntil.get(name);
+  if (!until) return true;
+  if (Date.now() >= until) {
+    unhealthyUntil.delete(name);
+    return true;
+  }
+  return false;
+}
+
+function markCliUnhealthy(name: string, err: Error): void {
+  const msg = err.message.toLowerCase();
+  if (QUOTA_SIGNALS.some((s) => msg.includes(s))) {
+    unhealthyUntil.set(name, Date.now() + CIRCUIT_COOLDOWN_MS);
+    logger.warn(
+      { cli: name, cooldownMs: CIRCUIT_COOLDOWN_MS },
+      "CLI quota-blocked — circuit opened",
+    );
+  }
+}
+
 /**
  * Call an LLM CLI with a prompt. Tries primary CLI first, falls back to the other.
  * Returns the raw stdout/output text.
@@ -34,11 +80,13 @@ export async function callLlm(prompt: string): Promise<string> {
   let lastError: Error | null = null;
 
   for (const cli of configs) {
+    if (!isCliHealthy(cli.name)) continue;
     try {
       const output = await callSingleCli(cli, prompt);
       return output;
     } catch (err) {
       lastError = err as Error;
+      markCliUnhealthy(cli.name, lastError);
       logger.warn({ cli: cli.name, error: lastError.message }, "LLM CLI failed, trying fallback");
     }
   }
@@ -57,7 +105,9 @@ export interface LlmVote {
  * cross-provider "jury" without a full Pyreez deliberation engine.
  */
 export async function callAllLlms(prompt: string): Promise<LlmVote[]> {
-  const configs = getCliConfigs();
+  const configs = getCliConfigs().filter((c) => isCliHealthy(c.name));
+  if (configs.length === 0) return [];
+
   const settled = await Promise.allSettled(
     configs.map(async (cli) => {
       const output = await callSingleCli(cli, prompt);
@@ -71,8 +121,10 @@ export async function callAllLlms(prompt: string): Promise<LlmVote[]> {
     if (result.status === "fulfilled") {
       votes.push(result.value);
     } else {
+      const err = result.reason as Error;
+      markCliUnhealthy(configs[i]!.name, err);
       logger.warn(
-        { cli: configs[i]!.name, error: (result.reason as Error).message },
+        { cli: configs[i]!.name, error: err.message },
         "LLM CLI failed in parallel call",
       );
     }

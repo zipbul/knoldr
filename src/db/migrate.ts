@@ -149,6 +149,62 @@ async function migrate() {
   // Drop obsolete table from prior crawler architecture
   await sql`DROP TABLE IF EXISTS crawl_domain`;
 
+  // ============================================================
+  // claim (v0.3) — atomic assertions extracted from entries
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS claim (
+      id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      entry_created_at TIMESTAMPTZ NOT NULL,
+      statement TEXT NOT NULL CHECK (length(statement) <= 2000),
+      type TEXT NOT NULL CHECK (type IN ('factual', 'subjective', 'predictive', 'normative')),
+      verdict TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not_applicable')),
+      certainty DOUBLE PRECISION NOT NULL DEFAULT 0.0 CHECK (certainty >= 0 AND certainty <= 1),
+      evidence JSONB,
+      embedding vector(384) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      FOREIGN KEY (entry_id, entry_created_at)
+        REFERENCES entry(id, created_at) ON DELETE CASCADE
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_claim_entry ON claim(entry_id, entry_created_at)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_claim_type_verdict ON claim(type, verdict)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_claim_embedding ON claim USING hnsw(embedding vector_cosine_ops)`;
+
+  // ============================================================
+  // verify_queue (v0.3)
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS verify_queue (
+      claim_id TEXT PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+      queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      priority INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_verify_queue_next ON verify_queue(priority DESC, next_attempt_at) WHERE attempts < 3`;
+
+  // ============================================================
+  // entry_score (v0.3) — per-entry derived dimensions
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS entry_score (
+      entry_id TEXT NOT NULL,
+      entry_created_at TIMESTAMPTZ NOT NULL,
+      dimension TEXT NOT NULL CHECK (dimension IN ('factuality', 'novelty', 'actionability', 'signal')),
+      value DOUBLE PRECISION NOT NULL CHECK (value >= 0 AND value <= 1),
+      scored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      scored_by TEXT NOT NULL DEFAULT 'system',
+      PRIMARY KEY (entry_id, entry_created_at, dimension),
+      FOREIGN KEY (entry_id, entry_created_at)
+        REFERENCES entry(id, created_at) ON DELETE CASCADE
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_entry_score_dimension ON entry_score(dimension, value)`;
+
   logger.info("migrations complete");
   await sql.end();
 }

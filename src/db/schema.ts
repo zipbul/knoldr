@@ -203,3 +203,102 @@ export const retryQueue = pgTable(
       .where(sql`${t.attempts} < 3`),
   ],
 );
+
+// ============================================================
+// claim — Atomic assertions extracted from entries (v0.3)
+// ============================================================
+// Each Entry may produce N claims; each claim is a single-fact proposition
+// classified by epistemic type (factual/subjective/predictive/normative) and,
+// for factual claims, verified by Pyreez deliberation into a verdict +
+// certainty. Claim embeddings enable claim-level semantic retrieval and the
+// db_cross_ref verification step.
+export const claim = pgTable(
+  "claim",
+  {
+    id: text("id").primaryKey(),
+    entryId: text("entry_id").notNull(),
+    entryCreatedAt: timestamp("entry_created_at", { withTimezone: true }).notNull(),
+    statement: text("statement").notNull(),
+    type: text("type").notNull(),
+    verdict: text("verdict").notNull().default("unverified"),
+    certainty: doublePrecision("certainty").notNull().default(0.0),
+    evidence: jsonb("evidence"),
+    embedding: vector("embedding").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.entryId, t.entryCreatedAt],
+      foreignColumns: [entry.id, entry.createdAt],
+    }).onDelete("cascade"),
+    check(
+      "claim_type_values",
+      sql`${t.type} IN ('factual', 'subjective', 'predictive', 'normative')`,
+    ),
+    check(
+      "claim_verdict_values",
+      sql`${t.verdict} IN ('verified', 'disputed', 'unverified', 'not_applicable')`,
+    ),
+    check("claim_certainty_range", sql`${t.certainty} >= 0 AND ${t.certainty} <= 1`),
+    check("claim_statement_len", sql`length(${t.statement}) <= 2000`),
+    index("idx_claim_entry").on(t.entryId, t.entryCreatedAt),
+    index("idx_claim_type_verdict").on(t.type, t.verdict),
+    // pgvector hnsw index created via raw SQL in migration.
+  ],
+);
+
+// ============================================================
+// verify_queue — Factual claims awaiting Pyreez verification
+// ============================================================
+export const verifyQueue = pgTable(
+  "verify_queue",
+  {
+    claimId: text("claim_id").primaryKey(),
+    queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+    priority: integer("priority").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.claimId],
+      foreignColumns: [claim.id],
+    }).onDelete("cascade"),
+    index("idx_verify_queue_next")
+      .on(t.priority, t.nextAttemptAt)
+      .where(sql`${t.attempts} < 3`),
+  ],
+);
+
+// ============================================================
+// entry_score — Derived dimensions per entry (v0.3)
+// ============================================================
+// Composite PK (entry_id, entry_created_at, dimension). Partition-aware FK
+// to entry.  `dimension` is an enumerable string for forward compatibility
+// (v0.4 adds novelty/actionability/signal).
+export const entryScore = pgTable(
+  "entry_score",
+  {
+    entryId: text("entry_id").notNull(),
+    entryCreatedAt: timestamp("entry_created_at", { withTimezone: true }).notNull(),
+    dimension: text("dimension").notNull(),
+    value: doublePrecision("value").notNull(),
+    scoredAt: timestamp("scored_at", { withTimezone: true }).notNull().defaultNow(),
+    scoredBy: text("scored_by").notNull().default("system"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.entryId, t.entryCreatedAt, t.dimension] }),
+    foreignKey({
+      columns: [t.entryId, t.entryCreatedAt],
+      foreignColumns: [entry.id, entry.createdAt],
+    }).onDelete("cascade"),
+    check(
+      "entry_score_dimension_values",
+      sql`${t.dimension} IN ('factuality', 'novelty', 'actionability', 'signal')`,
+    ),
+    check("entry_score_value_range", sql`${t.value} >= 0 AND ${t.value} <= 1`),
+    index("idx_entry_score_dimension").on(t.dimension, t.value),
+  ],
+);

@@ -130,6 +130,48 @@ export function startServer() {
     }
   }, 5 * 60 * 1000);
 
+  // Claim extraction worker — every 30 seconds
+  // Picks up to N recently stored entries without claims and extracts
+  // them serially. Separated from ingest so bursty research doesn't
+  // spawn dozens of concurrent LLM CLI subprocesses.
+  setInterval(async () => {
+    try {
+      const { processClaimExtractionQueue } = await import("../claim/extract-queue");
+      await processClaimExtractionQueue();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "claim extraction worker failed");
+    }
+  }, 30 * 1000);
+
+  // Claim verify queue processor — every 2 minutes
+  // Pulls a small batch of factual claims, adjudicates via db_cross_ref +
+  // LLM judgment (see src/claim/verify.ts), updates verdict/certainty,
+  // and bumps entry.factuality.
+  setInterval(async () => {
+    try {
+      const { processVerifyQueue, updateFactualityScore } = await import("../claim/verify");
+      const processed = await processVerifyQueue();
+      if (processed > 0) {
+        // Recompute factuality for entries touched by this batch.
+        const { db } = await import("../db/connection");
+        const { claim } = await import("../db/schema");
+        const { sql } = await import("drizzle-orm");
+        const recent = await db
+          .selectDistinct({
+            entryId: claim.entryId,
+            entryCreatedAt: claim.entryCreatedAt,
+          })
+          .from(claim)
+          .where(sql`${claim.createdAt} > NOW() - INTERVAL '1 hour'`);
+        for (const r of recent) {
+          await updateFactualityScore(r.entryId, r.entryCreatedAt);
+        }
+      }
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "verify queue processing failed");
+    }
+  }, 2 * 60 * 1000);
+
   logger.info({ port, host }, "knoldr A2A server started");
   return server;
 }

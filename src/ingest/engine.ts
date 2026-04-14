@@ -189,6 +189,10 @@ async function processEntry(
 
   logger.info({ entryId: id, authority, decayRate, domains }, "entry stored");
 
+  // v0.3 claim extraction runs in a separate background task (see
+  // processClaimExtractionQueue) so ingest latency doesn't pay for a
+  // second LLM pass and concurrent ingests don't saturate the CLI.
+
   return { entryId: id, authority, decayRate, action: "stored" };
 }
 

@@ -116,6 +116,46 @@ export async function setupTestDb() {
     )
   `;
 
+  // v0.3: claim + verify_queue + entry_score
+  await sql`
+    CREATE TABLE IF NOT EXISTS claim (
+      id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      entry_created_at TIMESTAMPTZ NOT NULL,
+      statement TEXT NOT NULL,
+      type TEXT NOT NULL,
+      verdict TEXT NOT NULL DEFAULT 'unverified',
+      certainty DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+      evidence JSONB,
+      embedding vector(384) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      FOREIGN KEY (entry_id, entry_created_at)
+        REFERENCES entry(id, created_at) ON DELETE CASCADE
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS verify_queue (
+      claim_id TEXT PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+      queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      priority INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS entry_score (
+      entry_id TEXT NOT NULL,
+      entry_created_at TIMESTAMPTZ NOT NULL,
+      dimension TEXT NOT NULL,
+      value DOUBLE PRECISION NOT NULL,
+      scored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      scored_by TEXT NOT NULL DEFAULT 'system',
+      PRIMARY KEY (entry_id, entry_created_at, dimension),
+      FOREIGN KEY (entry_id, entry_created_at)
+        REFERENCES entry(id, created_at) ON DELETE CASCADE
+    )
+  `;
+
   // pgroonga index
   await sql`CREATE INDEX IF NOT EXISTS idx_entry_fulltext ON entry USING pgroonga(title, content)`;
 }
@@ -128,6 +168,9 @@ export async function cleanTestDb() {
   await sql`DELETE FROM entry_source`;
   await sql`DELETE FROM entry_tag`;
   await sql`DELETE FROM entry_domain`;
+  await sql`DELETE FROM verify_queue`;
+  await sql`DELETE FROM entry_score`;
+  await sql`DELETE FROM claim`;
   await sql`DELETE FROM retry_queue`;
   await sql`DELETE FROM entry`;
 }

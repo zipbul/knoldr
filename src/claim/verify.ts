@@ -2,7 +2,7 @@ import { z } from "zod/v4";
 import { eq, sql, desc, and, lte, lt } from "drizzle-orm";
 import { db } from "../db/connection";
 import { claim, verifyQueue, entry, entryScore, entrySource } from "../db/schema";
-import { callLlm, extractJson } from "../llm/cli";
+import { callAllLlms, extractJson, type LlmVote } from "../llm/cli";
 import { logger } from "../observability/logger";
 
 const VERDICTS = ["verified", "disputed", "unverified"] as const;
@@ -12,11 +12,12 @@ export interface VerifyResult {
   verdict: Verdict;
   certainty: number;
   evidence: {
-    source: "db_cross_ref" | "llm_judgment";
+    source: "db_cross_ref" | "llm_jury";
     corroborations?: number;
     contradictions?: number;
     rationale?: string;
     sourceUrls?: string[];
+    votes?: Array<{ cli: string; verdict: Verdict; certainty: number }>;
   };
 }
 
@@ -82,18 +83,9 @@ export async function verifyClaim(claimId: string): Promise<VerifyResult | null>
       ),
     );
 
-  const judgment = await llmJudgment(row.statement, sources.map((s) => s.url));
-  if (!judgment) return null;
-
-  return {
-    verdict: judgment.verdict,
-    certainty: judgment.certainty,
-    evidence: {
-      source: "llm_judgment",
-      rationale: judgment.rationale,
-      sourceUrls: sources.map((s) => s.url),
-    },
-  };
+  const jury = await llmJury(row.statement, sources.map((s) => s.url));
+  if (!jury) return null;
+  return jury;
 }
 
 async function dbCrossRef(
@@ -120,11 +112,10 @@ async function dbCrossRef(
   return { corroborations, contradictions };
 }
 
-async function llmJudgment(
-  statement: string,
-  sourceUrls: string[],
-): Promise<z.infer<typeof judgmentSchema> | null> {
-  const prompt = `You are a fact-verification judge.
+type Judgment = z.infer<typeof judgmentSchema>;
+
+function buildJudgmentPrompt(statement: string, sourceUrls: string[]): string {
+  return `You are a fact-verification judge.
 
 Claim: "${statement}"
 
@@ -138,15 +129,94 @@ Rules:
 - disputed: evidence contradicts it
 - unverified: insufficient evidence either way
 - certainty reflects confidence in the verdict, not in the claim being true`;
+}
 
+function parseVote(vote: LlmVote): Judgment | null {
   try {
-    const output = await callLlm(prompt);
-    const raw = extractJson(output);
-    return judgmentSchema.parse(raw);
+    return judgmentSchema.parse(extractJson(vote.output));
   } catch (err) {
-    logger.warn({ error: (err as Error).message }, "LLM claim judgment failed");
+    logger.warn(
+      { cli: vote.cli, error: (err as Error).message },
+      "jury vote unparseable",
+    );
     return null;
   }
+}
+
+/**
+ * Cross-provider jury: fires every configured CLI in parallel and
+ * combines their verdicts. Unanimous verified → high certainty,
+ * majority verified → medium certainty, disagreement → disputed,
+ * all unverified or no votes → unverified.
+ */
+async function llmJury(
+  statement: string,
+  sourceUrls: string[],
+): Promise<VerifyResult | null> {
+  const prompt = buildJudgmentPrompt(statement, sourceUrls);
+  const votes = await callAllLlms(prompt);
+  if (votes.length === 0) return null;
+
+  const parsed = votes
+    .map((v) => ({ cli: v.cli, j: parseVote(v) }))
+    .filter((p): p is { cli: string; j: Judgment } => p.j !== null);
+  if (parsed.length === 0) return null;
+
+  const tallies: Record<Verdict, number> = {
+    verified: 0,
+    disputed: 0,
+    unverified: 0,
+  };
+  let certaintySum = 0;
+  for (const p of parsed) {
+    tallies[p.j.verdict]++;
+    certaintySum += p.j.certainty;
+  }
+  const certaintyAvg = certaintySum / parsed.length;
+
+  let verdict: Verdict;
+  let certainty: number;
+  if (tallies.verified === parsed.length && parsed.length >= 2) {
+    // Unanimous verified across ≥2 CLIs — highest confidence.
+    verdict = "verified";
+    certainty = Math.min(0.95, certaintyAvg + 0.1);
+  } else if (tallies.disputed === parsed.length && parsed.length >= 2) {
+    verdict = "disputed";
+    certainty = Math.min(0.95, certaintyAvg + 0.1);
+  } else if (tallies.verified > tallies.disputed && tallies.verified > tallies.unverified) {
+    verdict = "verified";
+    certainty = certaintyAvg * 0.7;
+  } else if (tallies.disputed > tallies.verified && tallies.disputed > tallies.unverified) {
+    verdict = "disputed";
+    certainty = certaintyAvg * 0.7;
+  } else if (tallies.verified > 0 && tallies.disputed > 0) {
+    // Jurors split on opposite verdicts — inconclusive.
+    verdict = "disputed";
+    certainty = certaintyAvg * 0.4;
+  } else {
+    verdict = "unverified";
+    certainty = certaintyAvg * 0.5;
+  }
+
+  const rationale = parsed
+    .map((p) => `[${p.cli}]${p.j.verdict}:${p.j.rationale.slice(0, 100)}`)
+    .join(" | ")
+    .slice(0, 1000);
+
+  return {
+    verdict,
+    certainty,
+    evidence: {
+      source: "llm_jury",
+      rationale,
+      sourceUrls,
+      votes: parsed.map((p) => ({
+        cli: p.cli,
+        verdict: p.j.verdict,
+        certainty: p.j.certainty,
+      })),
+    },
+  };
 }
 
 /** Process up to `batchSize` claims from the verify queue. */

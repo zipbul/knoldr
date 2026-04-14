@@ -4,6 +4,9 @@ import { research } from "../../collect/research";
 import { fetchClaimsForEntries, fetchFactualityForEntries } from "../../claim/query";
 import { logger } from "../../observability/logger";
 import type { SearchResult } from "../../search/search";
+import type { Progress } from "../dispatcher";
+
+const NOOP_PROGRESS: Progress = { emit: () => {} };
 
 const findInputSchema = z.object({
   query: z.string().min(1).max(1000).optional(),
@@ -19,12 +22,16 @@ const findInputSchema = z.object({
 
 export type FindInput = z.infer<typeof findInputSchema>;
 
-export async function handleFind(input: Record<string, unknown>): Promise<unknown> {
+export async function handleFind(
+  input: Record<string, unknown>,
+  progress: Progress = NOOP_PROGRESS,
+): Promise<unknown> {
   const validated = findInputSchema.parse(input);
   const queryText = validated.query ?? validated.topic;
 
   // No query text → explore mode (filter-only browsing)
   if (!queryText) {
+    progress.emit("explore");
     const result = await explore({
       domain: validated.domain,
       tags: validated.tags,
@@ -38,6 +45,7 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
   }
 
   // Step 1: search existing data
+  progress.emit("search_stored", { query: queryText });
   const firstResult = await search({
     query: queryText,
     domain: validated.domain,
@@ -74,11 +82,19 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
     },
     "find: insufficient or weak results, starting auto-research",
   );
-
-  const researchResult = await research({
-    topic: queryText,
-    domain: validated.domain,
+  progress.emit("research_started", {
+    query: queryText,
+    storedMatches: firstResult.entries.length,
+    topCoverage,
   });
+
+  const researchResult = await research(
+    {
+      topic: queryText,
+      domain: validated.domain,
+    },
+    progress,
+  );
 
   logger.info(
     {
@@ -88,8 +104,15 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
     },
     "find: auto-research completed",
   );
+  progress.emit("research_completed", {
+    urlsProcessed: researchResult.urlsProcessed,
+    entriesStored: researchResult.entriesStored,
+    entriesSkippedLowRelevance: researchResult.entriesSkippedLowRelevance,
+    status: researchResult.status,
+  });
 
   // Step 3: re-search with newly ingested data
+  progress.emit("search_rerun");
   const finalResult = await search({
     query: queryText,
     domain: validated.domain,

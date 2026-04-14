@@ -3,6 +3,9 @@ import { collectSearchHits, type SearchHit } from "./search-scraper";
 import { ingest } from "../ingest/engine";
 import { parseStoreInput } from "../ingest/validate";
 import { logger } from "../observability/logger";
+import type { Progress } from "../a2a/dispatcher";
+
+const NOOP_PROGRESS: Progress = { emit: () => {} };
 
 export interface ResearchInput {
   topic: string;
@@ -32,21 +35,28 @@ const MIN_TOPIC_COVERAGE = 0.25;
  * 3. Drop hits whose title+summary covers < MIN_TOPIC_COVERAGE of topic terms
  * 4. Ingest each remaining hit with sourceMetadata carrying publishedAt/siteName
  */
-export async function research(input: ResearchInput): Promise<ResearchResult> {
+export async function research(
+  input: ResearchInput,
+  progress: Progress = NOOP_PROGRESS,
+): Promise<ResearchResult> {
   const maxResults = Math.min(input.maxResults ?? 50, 200);
   const deadline = Date.now() + TIMEOUT_MS;
 
   logger.info({ topic: input.topic, maxResults }, "LangSearch research started");
 
+  progress.emit("query_decompose", { topic: input.topic });
   const subQueries = await decomposeQuery(input.topic);
   logger.info(
     { queryCount: subQueries.length, queries: subQueries.map((q) => q.main) },
     "queries decomposed",
   );
+  progress.emit("query_decomposed", { queryCount: subQueries.length });
 
+  progress.emit("langsearch_querying", { queryCount: subQueries.length });
   const hits = await collectSearchHits(subQueries, input.focusDomains);
   const limited = hits.slice(0, maxResults);
   logger.info({ hitCount: hits.length, limited: limited.length }, "LangSearch hits collected");
+  progress.emit("langsearch_collected", { hits: hits.length, toProcess: limited.length });
 
   const topicTerms = input.topic
     .toLowerCase()
@@ -61,7 +71,11 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
     status: "completed",
   };
 
-  for (const hit of limited) {
+  // Report ingest progress every N hits so streaming clients can tell
+  // the worker is still alive during minutes-long research flows.
+  const PROGRESS_STRIDE = Math.max(1, Math.floor(limited.length / 10));
+
+  for (const [idx, hit] of limited.entries()) {
     if (Date.now() > deadline) {
       result.status = "partial";
       break;
@@ -86,6 +100,15 @@ export async function research(input: ResearchInput): Promise<ResearchResult> {
       }
     } catch (err) {
       logger.warn({ url: hit.url, error: (err as Error).message }, "ingest failed for hit");
+    }
+
+    if ((idx + 1) % PROGRESS_STRIDE === 0 || idx + 1 === limited.length) {
+      progress.emit("ingest_progress", {
+        processed: idx + 1,
+        total: limited.length,
+        stored: result.entriesStored,
+        skipped: result.entriesSkippedLowRelevance,
+      });
     }
   }
 

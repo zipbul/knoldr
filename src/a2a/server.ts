@@ -36,6 +36,10 @@ export function startServer() {
   const server = Bun.serve({
     port,
     hostname: host,
+    // `find` auto-research can run for minutes (LangSearch + LLM decompose +
+    // embed). Bun's default idleTimeout (10s) closes the SSE stream before
+    // the final event arrives, so raise it to cover the research budget.
+    idleTimeout: 255,
     async fetch(req) {
       const url = new URL(req.url);
       const path = url.pathname;
@@ -74,11 +78,10 @@ export function startServer() {
           const handler = getTransportHandler();
           const result = await handler.handle(body);
 
-          // handle() returns JSONRPCResponse or AsyncGenerator
+          // handle() returns JSONRPCResponse for `message/send` or an
+          // AsyncGenerator for `message/stream`/`tasks/resubscribe`.
           if (isAsyncGenerator(result)) {
-            // Streaming not supported in v0.2, collect first result
-            const first = await result.next();
-            return Response.json(first.value);
+            return streamSse(result);
           }
 
           return Response.json(result);
@@ -127,10 +130,110 @@ export function startServer() {
     }
   }, 5 * 60 * 1000);
 
+  // Claim extraction worker — every 30 seconds
+  // Picks up to N recently stored entries without claims and extracts
+  // them serially. Separated from ingest so bursty research doesn't
+  // spawn dozens of concurrent LLM CLI subprocesses.
+  setInterval(async () => {
+    try {
+      const { processClaimExtractionQueue } = await import("../claim/extract-queue");
+      await processClaimExtractionQueue();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "claim extraction worker failed");
+    }
+  }, 30 * 1000);
+
+  // KG triple extraction worker — every 60 seconds
+  // Picks verified factual claims without kg_relation rows and extracts
+  // (subject, predicate, object) triples. Runs after verify_queue so
+  // only evidence-backed assertions populate the graph.
+  setInterval(async () => {
+    try {
+      const { processKgExtractionQueue } = await import("../kg/extract-queue");
+      await processKgExtractionQueue();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "KG extraction worker failed");
+    }
+  }, 60 * 1000);
+
+  // Claim verify queue processor — every 2 minutes
+  // Pulls a small batch of factual claims, adjudicates via db_cross_ref +
+  // LLM judgment (see src/claim/verify.ts), updates verdict/certainty,
+  // and bumps entry.factuality.
+  setInterval(async () => {
+    try {
+      const { processVerifyQueue, updateFactualityScore } = await import("../claim/verify");
+      const processed = await processVerifyQueue();
+      if (processed > 0) {
+        // Recompute factuality for entries touched by this batch.
+        const { db } = await import("../db/connection");
+        const { claim } = await import("../db/schema");
+        const { sql } = await import("drizzle-orm");
+        const recent = await db
+          .selectDistinct({
+            entryId: claim.entryId,
+            entryCreatedAt: claim.entryCreatedAt,
+          })
+          .from(claim)
+          .where(sql`${claim.createdAt} > NOW() - INTERVAL '1 hour'`);
+        for (const r of recent) {
+          await updateFactualityScore(r.entryId, r.entryCreatedAt);
+        }
+      }
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "verify queue processing failed");
+    }
+  }, 2 * 60 * 1000);
+
   logger.info({ port, host }, "knoldr A2A server started");
   return server;
 }
 
 function isAsyncGenerator(obj: unknown): obj is AsyncGenerator {
   return obj !== null && typeof obj === "object" && Symbol.asyncIterator in (obj as object);
+}
+
+/** Forward an A2A SDK AsyncGenerator as a text/event-stream response.
+ * Emits an SSE comment line every KEEPALIVE_MS so the TCP connection
+ * does not hit Bun's idleTimeout between executor events. */
+function streamSse(gen: AsyncGenerator<unknown>): Response {
+  const encoder = new TextEncoder();
+  const KEEPALIVE_MS = 15_000;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const keepalive = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(`: keepalive\n\n`));
+        } catch {
+          // controller may already be closed
+        }
+      }, KEEPALIVE_MS);
+
+      try {
+        for await (const event of gen) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        }
+      } catch (err) {
+        const payload = {
+          jsonrpc: "2.0",
+          error: { code: -32603, message: (err as Error).message },
+          id: null,
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+        logger.error({ error: (err as Error).message }, "A2A stream failed");
+      } finally {
+        clearInterval(keepalive);
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }

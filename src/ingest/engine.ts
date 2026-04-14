@@ -110,6 +110,7 @@ async function processEntry(
   const tags = decomposed.tags ?? [];
   const language = decomposed.language ?? (await detectLanguage(content));
   const decayRate = decomposed.decayRate ?? 0.01;
+  const mergedMetadata = normalizeMetadata(decomposed.metadata);
 
   // Step 3: Generate embedding
   const embeddingText = buildEmbeddingInput(title, content);
@@ -138,7 +139,7 @@ async function processEntry(
       title,
       content,
       language,
-      metadata: decomposed.metadata ?? null,
+      metadata: mergedMetadata,
       authority,
       decayRate,
       status: "active",
@@ -188,5 +189,16 @@ async function processEntry(
 
   logger.info({ entryId: id, authority, decayRate, domains }, "entry stored");
 
+  // v0.3 claim extraction runs in a separate background task (see
+  // processClaimExtractionQueue) so ingest latency doesn't pay for a
+  // second LLM pass and concurrent ingests don't saturate the CLI.
+
   return { entryId: id, authority, decayRate, action: "stored" };
+}
+
+function normalizeMetadata(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | null {
+  if (!metadata) return null;
+  return Object.keys(metadata).length > 0 ? metadata : null;
 }

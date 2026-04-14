@@ -1,7 +1,5 @@
 import { decomposeQuery } from "./query-decompose";
-import { collectSeedUrls } from "./search-scraper";
-import { crawl } from "./crawler";
-import { searchAndExtractYoutube } from "./extract-youtube";
+import { collectSearchHits, type SearchHit } from "./search-scraper";
 import { ingest } from "../ingest/engine";
 import { parseStoreInput } from "../ingest/validate";
 import { logger } from "../observability/logger";
@@ -9,99 +7,118 @@ import { logger } from "../observability/logger";
 export interface ResearchInput {
   topic: string;
   domain?: string;
-  maxUrls?: number;
-  contentTypes?: string[];
-  maxDepth?: number;
+  maxResults?: number;
   focusDomains?: string[];
 }
 
 export interface ResearchResult {
   entries: Array<{ entryId: string; action: string }>;
-  urlsCrawled: number;
+  urlsProcessed: number;
+  entriesStored: number;
+  entriesSkippedLowRelevance: number;
   status: "completed" | "partial";
 }
 
-const DEFAULT_CONTENT_TYPES = ["html", "pdf", "image", "youtube"];
-const TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+const TIMEOUT_MS = 5 * 60 * 1000;
+// Minimum fraction of topic terms that must appear in a hit's title+summary
+// before ingesting. Prevents LangSearch from feeding unrelated pages into the
+// store when the query shares only an incidental term.
+const MIN_TOPIC_COVERAGE = 0.25;
 
 /**
- * Deep Crawl Engine orchestrator.
- * 1. Query decomposition (Gemini CLI)
- * 2. Seed URL collection (Google CSE)
- * 3. Deep crawling (Playwright + extractors)
- * 4. YouTube search (parallel)
+ * LangSearch-only research.
+ * 1. Decompose topic into sub-queries (LLM)
+ * 2. LangSearch web search for each sub-query → rich hits (url/title/summary/publishedAt)
+ * 3. Drop hits whose title+summary covers < MIN_TOPIC_COVERAGE of topic terms
+ * 4. Ingest each remaining hit with sourceMetadata carrying publishedAt/siteName
  */
 export async function research(input: ResearchInput): Promise<ResearchResult> {
-  const maxUrls = Math.min(input.maxUrls ?? 50, 200);
-  const contentTypes = new Set(input.contentTypes ?? DEFAULT_CONTENT_TYPES);
-  const maxDepth = Math.min(input.maxDepth ?? 2, 5);
+  const maxResults = Math.min(input.maxResults ?? 50, 200);
   const deadline = Date.now() + TIMEOUT_MS;
 
-  logger.info({ topic: input.topic, maxUrls, maxDepth, contentTypes: [...contentTypes] }, "Deep Crawl Engine started");
+  logger.info({ topic: input.topic, maxResults }, "LangSearch research started");
 
-  // Step 1: Query Decomposition
   const subQueries = await decomposeQuery(input.topic);
-  logger.info({ queryCount: subQueries.length, queries: subQueries.map((q) => q.main) }, "queries decomposed");
+  logger.info(
+    { queryCount: subQueries.length, queries: subQueries.map((q) => q.main) },
+    "queries decomposed",
+  );
 
-  // Step 2: Seed URL collection (Google/DuckDuckGo scraping, no API key)
-  const seedUrls = await collectSeedUrls(subQueries, input.focusDomains);
-  logger.info({ seedCount: seedUrls.length }, "seed URLs collected");
+  const hits = await collectSearchHits(subQueries, input.focusDomains);
+  const limited = hits.slice(0, maxResults);
+  logger.info({ hitCount: hits.length, limited: limited.length }, "LangSearch hits collected");
 
-  if (seedUrls.length === 0) {
-    return { entries: [], urlsCrawled: 0, status: "partial" };
-  }
+  const topicTerms = input.topic
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length >= 2);
 
-  // Step 3: Deep crawling
-  const crawlResult = await crawl(seedUrls, {
-    topic: input.topic,
-    maxUrls,
-    contentTypes,
-    maxDepth,
-    focusDomains: input.focusDomains ?? [],
-  }, deadline);
+  const result: ResearchResult = {
+    entries: [],
+    urlsProcessed: 0,
+    entriesStored: 0,
+    entriesSkippedLowRelevance: 0,
+    status: "completed",
+  };
 
-  // Step 4: YouTube search (if enabled and budget remaining)
-  if (contentTypes.has("youtube") && Date.now() < deadline) {
-    const ytBudget = Math.min(2, subQueries.length);
-    for (let i = 0; i < ytBudget && Date.now() < deadline; i++) {
-      const query = subQueries[i]?.main;
-      if (!query) break;
+  for (const hit of limited) {
+    if (Date.now() > deadline) {
+      result.status = "partial";
+      break;
+    }
+    result.urlsProcessed++;
 
-      const videos = await searchAndExtractYoutube(query, 3);
-      for (const video of videos) {
-        if (Date.now() > deadline) break;
+    if (!passesTopicGate(hit, topicTerms)) {
+      result.entriesSkippedLowRelevance++;
+      logger.debug({ url: hit.url, topic: input.topic }, "hit skipped: low topic coverage");
+      continue;
+    }
 
-        const raw = `${video.title}\n\n${video.text}`;
-        const url = `https://www.youtube.com/watch?v=${video.videoId}`;
-
-        try {
-          const storeInput = parseStoreInput({
-            raw: raw.slice(0, 200_000),
-            sources: [{ url, sourceType: "community_forum" }],
-          });
-          const ingestResults = await ingest(storeInput);
-          for (const r of ingestResults) {
-            crawlResult.entries.push({ entryId: r.entryId, action: r.action });
-          }
-        } catch (err) {
-          logger.warn({ videoId: video.videoId, error: (err as Error).message }, "YouTube ingestion failed");
-        }
+    try {
+      const storeInput = parseStoreInput({
+        raw: buildRawText(hit).slice(0, 200_000),
+        sources: [{ url: hit.url, sourceType: estimateSourceType(hit.url) }],
+      });
+      const ingested = await ingest(storeInput);
+      for (const r of ingested) {
+        result.entries.push({ entryId: r.entryId, action: r.action });
+        if (r.action === "stored") result.entriesStored++;
       }
+    } catch (err) {
+      logger.warn({ url: hit.url, error: (err as Error).message }, "ingest failed for hit");
     }
   }
 
-  const status = Date.now() > deadline ? "partial" : "completed";
-  logger.info({
-    topic: input.topic,
-    urlsCrawled: crawlResult.urlsCrawled,
-    entriesStored: crawlResult.entries.filter((e) => e.action === "stored").length,
-    status,
-  }, "Deep Crawl Engine finished");
+  logger.info(
+    {
+      topic: input.topic,
+      urlsProcessed: result.urlsProcessed,
+      entriesStored: result.entriesStored,
+      entriesSkippedLowRelevance: result.entriesSkippedLowRelevance,
+      status: result.status,
+    },
+    "LangSearch research finished",
+  );
 
-  return {
-    entries: crawlResult.entries,
-    urlsCrawled: crawlResult.urlsCrawled,
-    status,
-  };
+  return result;
 }
 
+function buildRawText(hit: SearchHit): string {
+  return hit.content ? `${hit.title}\n\n${hit.content}` : hit.title;
+}
+
+function passesTopicGate(hit: SearchHit, topicTerms: string[]): boolean {
+  if (topicTerms.length === 0) return true;
+  const haystack = `${hit.title} ${hit.content}`.toLowerCase();
+  const matched = topicTerms.filter((t) => haystack.includes(t)).length;
+  return matched / topicTerms.length >= MIN_TOPIC_COVERAGE;
+}
+
+function estimateSourceType(url: string): string {
+  if (url.includes("github.com")) return "github_release";
+  if (url.includes("arxiv.org")) return "research_paper";
+  if (url.includes(".gov") || url.includes(".edu")) return "official_docs";
+  if (url.includes("medium.com") || url.includes("dev.to")) return "established_blog";
+  if (url.includes("stackoverflow.com") || url.includes("reddit.com")) return "community_forum";
+  return "unknown";
+}

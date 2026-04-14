@@ -3,7 +3,11 @@ import type { Message } from "@a2a-js/sdk";
 import { v4 as uuid } from "uuid";
 import { extractSkillRequest } from "./types";
 import { handleFind } from "./handlers/find";
+import { handleFeedback } from "./handlers/feedback";
 import { logger } from "../observability/logger";
+
+const SUPPORTED_SKILLS = ["find", "feedback"] as const;
+type SupportedSkill = (typeof SUPPORTED_SKILLS)[number];
 
 function makeMessage(data: Record<string, unknown>): Message {
   return {
@@ -14,6 +18,15 @@ function makeMessage(data: Record<string, unknown>): Message {
   };
 }
 
+function runSkill(skill: SupportedSkill, input: Record<string, unknown>): Promise<unknown> {
+  switch (skill) {
+    case "find":
+      return handleFind(input);
+    case "feedback":
+      return handleFeedback(input) as Promise<unknown>;
+  }
+}
+
 export class KnoldrExecutor implements AgentExecutor {
   async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
     const { userMessage, taskId } = requestContext;
@@ -21,16 +34,17 @@ export class KnoldrExecutor implements AgentExecutor {
     try {
       const { skill, input } = extractSkillRequest(userMessage.parts);
 
-      if (skill !== "find") {
-        eventBus.publish(makeMessage({ error: `Unknown skill: ${skill}. Use "find".` }));
+      if (!SUPPORTED_SKILLS.includes(skill as SupportedSkill)) {
+        eventBus.publish(
+          makeMessage({ error: `Unknown skill: ${skill}. Supported: ${SUPPORTED_SKILLS.join(", ")}.` }),
+        );
         eventBus.finished();
         return;
       }
 
       logger.info({ skill, taskId }, "executing A2A skill");
 
-      // find can trigger research internally which is long-running → run async
-      handleFind(input)
+      runSkill(skill as SupportedSkill, input)
         .then((result) => {
           eventBus.publish(makeMessage(result as Record<string, unknown>));
           eventBus.finished();

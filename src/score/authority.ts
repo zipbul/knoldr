@@ -1,6 +1,6 @@
 import type { Source } from "../ingest/validate";
 
-export const SOURCE_TYPE_SCORES: Record<string, number> = {
+const SOURCE_TYPE_SCORES: Record<string, number> = {
   official_docs: 0.9,
   github_release: 0.85,
   cve_db: 0.9,

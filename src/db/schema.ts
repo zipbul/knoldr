@@ -3,7 +3,6 @@ import {
   text,
   doublePrecision,
   timestamp,
-  boolean,
   jsonb,
   integer,
   index,
@@ -185,34 +184,6 @@ export const feedbackLog = pgTable(
 );
 
 // ============================================================
-// crawl_domain — Domain crawling policy (Deep Crawl Engine)
-// ============================================================
-export const crawlDomain = pgTable(
-  "crawl_domain",
-  {
-    domain: text("domain").primaryKey(),
-    sourceType: text("source_type").notNull().default("unknown"),
-    trust: doublePrecision("trust").notNull().default(0.1),
-    blocked: boolean("blocked").notNull().default(false),
-    blockReason: text("block_reason"),
-    rateLimitMs: integer("rate_limit_ms").notNull().default(2000),
-    robotsTxt: text("robots_txt"),
-    robotsFetchedAt: timestamp("robots_fetched_at", { withTimezone: true }),
-    config: jsonb("config"),
-    totalCrawled: integer("total_crawled").notNull().default(0),
-    totalSuccess: integer("total_success").notNull().default(0),
-    lastCrawledAt: timestamp("last_crawled_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    check("crawl_domain_trust_range", sql`${t.trust} >= 0 AND ${t.trust} <= 1`),
-    index("idx_crawl_domain_blocked").on(t.blocked),
-    index("idx_crawl_domain_source_type").on(t.sourceType),
-  ],
-);
-
-// ============================================================
 // retry_queue — Failed ingestion retry
 // ============================================================
 export const retryQueue = pgTable(
@@ -230,5 +201,169 @@ export const retryQueue = pgTable(
     index("idx_retry_queue_next")
       .on(t.nextRetryAt)
       .where(sql`${t.attempts} < 3`),
+  ],
+);
+
+// ============================================================
+// claim — Atomic assertions extracted from entries (v0.3)
+// ============================================================
+// Each Entry may produce N claims; each claim is a single-fact proposition
+// classified by epistemic type (factual/subjective/predictive/normative) and,
+// for factual claims, verified by Pyreez deliberation into a verdict +
+// certainty. Claim embeddings enable claim-level semantic retrieval and the
+// db_cross_ref verification step.
+export const claim = pgTable(
+  "claim",
+  {
+    id: text("id").primaryKey(),
+    entryId: text("entry_id").notNull(),
+    entryCreatedAt: timestamp("entry_created_at", { withTimezone: true }).notNull(),
+    statement: text("statement").notNull(),
+    type: text("type").notNull(),
+    verdict: text("verdict").notNull().default("unverified"),
+    certainty: doublePrecision("certainty").notNull().default(0.0),
+    evidence: jsonb("evidence"),
+    embedding: vector("embedding").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.entryId, t.entryCreatedAt],
+      foreignColumns: [entry.id, entry.createdAt],
+    }).onDelete("cascade"),
+    check(
+      "claim_type_values",
+      sql`${t.type} IN ('factual', 'subjective', 'predictive', 'normative')`,
+    ),
+    check(
+      "claim_verdict_values",
+      sql`${t.verdict} IN ('verified', 'disputed', 'unverified', 'not_applicable')`,
+    ),
+    check("claim_certainty_range", sql`${t.certainty} >= 0 AND ${t.certainty} <= 1`),
+    check("claim_statement_len", sql`length(${t.statement}) <= 2000`),
+    index("idx_claim_entry").on(t.entryId, t.entryCreatedAt),
+    index("idx_claim_type_verdict").on(t.type, t.verdict),
+    // pgvector hnsw index created via raw SQL in migration.
+  ],
+);
+
+// ============================================================
+// verify_queue — Factual claims awaiting Pyreez verification
+// ============================================================
+export const verifyQueue = pgTable(
+  "verify_queue",
+  {
+    claimId: text("claim_id").primaryKey(),
+    queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+    priority: integer("priority").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.claimId],
+      foreignColumns: [claim.id],
+    }).onDelete("cascade"),
+    index("idx_verify_queue_next")
+      .on(t.priority, t.nextAttemptAt)
+      .where(sql`${t.attempts} < 3`),
+  ],
+);
+
+// ============================================================
+// entity — Knowledge Graph nodes (v0.4)
+// ============================================================
+export const entity = pgTable(
+  "entity",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    type: text("type").notNull(),
+    aliases: text("aliases")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    metadata: jsonb("metadata"),
+    embedding: vector("embedding").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("entity_name_len", sql`length(${t.name}) <= 200`),
+    check("entity_type_len", sql`length(${t.type}) <= 50`),
+    index("idx_entity_name").on(t.name),
+    index("idx_entity_type").on(t.type),
+    // pgvector hnsw index created via raw SQL in migration.
+  ],
+);
+
+// ============================================================
+// kg_relation — Knowledge Graph edges (v0.4)
+// ============================================================
+export const kgRelation = pgTable(
+  "kg_relation",
+  {
+    id: text("id").primaryKey(),
+    sourceEntityId: text("source_entity_id").notNull(),
+    targetEntityId: text("target_entity_id").notNull(),
+    relationType: text("relation_type").notNull(),
+    claimId: text("claim_id"),
+    weight: doublePrecision("weight").notNull().default(1.0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.sourceEntityId],
+      foreignColumns: [entity.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [t.targetEntityId],
+      foreignColumns: [entity.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [t.claimId],
+      foreignColumns: [claim.id],
+    }).onDelete("set null"),
+    check("kg_relation_weight_range", sql`${t.weight} >= 0 AND ${t.weight} <= 1`),
+    check(
+      "kg_relation_no_self_loop",
+      sql`${t.sourceEntityId} <> ${t.targetEntityId}`,
+    ),
+    uniqueIndex("uniq_kg_relation_edge")
+      .on(t.sourceEntityId, t.targetEntityId, t.relationType, t.claimId),
+    index("idx_kg_relation_source").on(t.sourceEntityId),
+    index("idx_kg_relation_target").on(t.targetEntityId),
+  ],
+);
+
+// ============================================================
+// entry_score — Derived dimensions per entry (v0.3)
+// ============================================================
+// Composite PK (entry_id, entry_created_at, dimension). Partition-aware FK
+// to entry.  `dimension` is an enumerable string for forward compatibility
+// (v0.4 adds novelty/actionability/signal).
+export const entryScore = pgTable(
+  "entry_score",
+  {
+    entryId: text("entry_id").notNull(),
+    entryCreatedAt: timestamp("entry_created_at", { withTimezone: true }).notNull(),
+    dimension: text("dimension").notNull(),
+    value: doublePrecision("value").notNull(),
+    scoredAt: timestamp("scored_at", { withTimezone: true }).notNull().defaultNow(),
+    scoredBy: text("scored_by").notNull().default("system"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.entryId, t.entryCreatedAt, t.dimension] }),
+    foreignKey({
+      columns: [t.entryId, t.entryCreatedAt],
+      foreignColumns: [entry.id, entry.createdAt],
+    }).onDelete("cascade"),
+    check(
+      "entry_score_dimension_values",
+      sql`${t.dimension} IN ('factuality', 'novelty', 'actionability', 'signal')`,
+    ),
+    check("entry_score_value_range", sql`${t.value} >= 0 AND ${t.value} <= 1`),
+    index("idx_entry_score_dimension").on(t.dimension, t.value),
   ],
 );

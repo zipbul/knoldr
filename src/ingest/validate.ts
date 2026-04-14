@@ -69,9 +69,6 @@ export function parseStoreInput(input: unknown): StoreInput {
   return structuredStoreSchema.parse(input);
 }
 
-// Keep storeInputSchema for backward compat (union, does NOT enforce mutual exclusion)
-export const storeInputSchema = z.union([rawStoreSchema, structuredStoreSchema]);
-
 export function isRawInput(input: StoreInput): input is z.infer<typeof rawStoreSchema> {
   return "raw" in input;
 }

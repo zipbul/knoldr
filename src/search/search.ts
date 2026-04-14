@@ -34,7 +34,10 @@ export async function search(input: QueryInput): Promise<SearchResult> {
   // pgroonga FTS — convert query words to OR matching for better recall
   // AI agents send precise queries, but AND matching is too strict when
   // entries are atomically decomposed (each covers one aspect).
-  const orQuery = input.query.trim().split(/\s+/).join(" OR ");
+  // Term-coverage filtering is applied post-rank (see below) so that weak
+  // single-incidental-term matches don't pass as valid results.
+  const queryTerms = input.query.trim().split(/\s+/).filter((t) => t.length > 0);
+  const orQuery = queryTerms.join(" OR ");
   conditions.push(
     sql`(${entry.title} &@~ ${orQuery} OR ${entry.content} &@~ ${orQuery})`,
   );
@@ -77,8 +80,8 @@ export async function search(input: QueryInput): Promise<SearchResult> {
   // Enrich with domains, tags, sources
   const enriched = await enrichRows(rows);
 
-  // Rank by final score
-  const ranked = rank(enriched, "query");
+  // Rank by final score (and compute termCoverage against the query)
+  const ranked = rank(enriched, "query", queryTerms);
 
   // Apply cursor + limit
   const limit = Math.min(input.limit, 50);

@@ -116,22 +116,69 @@ export async function setupTestDb() {
     )
   `;
 
+  // v0.3: claim + verify_queue + entry_score
   await sql`
-    CREATE TABLE IF NOT EXISTS crawl_domain (
-      domain TEXT PRIMARY KEY,
-      source_type TEXT NOT NULL DEFAULT 'unknown',
-      trust DOUBLE PRECISION NOT NULL DEFAULT 0.1,
-      blocked BOOLEAN NOT NULL DEFAULT false,
-      block_reason TEXT,
-      rate_limit_ms INTEGER NOT NULL DEFAULT 2000,
-      robots_txt TEXT,
-      robots_fetched_at TIMESTAMPTZ,
-      config JSONB,
-      total_crawled INTEGER NOT NULL DEFAULT 0,
-      total_success INTEGER NOT NULL DEFAULT 0,
-      last_crawled_at TIMESTAMPTZ,
+    CREATE TABLE IF NOT EXISTS claim (
+      id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      entry_created_at TIMESTAMPTZ NOT NULL,
+      statement TEXT NOT NULL,
+      type TEXT NOT NULL,
+      verdict TEXT NOT NULL DEFAULT 'unverified',
+      certainty DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+      evidence JSONB,
+      embedding vector(384) NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      FOREIGN KEY (entry_id, entry_created_at)
+        REFERENCES entry(id, created_at) ON DELETE CASCADE
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS verify_queue (
+      claim_id TEXT PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+      queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      priority INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS entry_score (
+      entry_id TEXT NOT NULL,
+      entry_created_at TIMESTAMPTZ NOT NULL,
+      dimension TEXT NOT NULL,
+      value DOUBLE PRECISION NOT NULL,
+      scored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      scored_by TEXT NOT NULL DEFAULT 'system',
+      PRIMARY KEY (entry_id, entry_created_at, dimension),
+      FOREIGN KEY (entry_id, entry_created_at)
+        REFERENCES entry(id, created_at) ON DELETE CASCADE
+    )
+  `;
+
+  // v0.4: entity + kg_relation
+  await sql`
+    CREATE TABLE IF NOT EXISTS entity (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      aliases TEXT[] NOT NULL DEFAULT '{}',
+      metadata JSONB,
+      embedding vector(384) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS kg_relation (
+      id TEXT PRIMARY KEY,
+      source_entity_id TEXT NOT NULL REFERENCES entity(id) ON DELETE CASCADE,
+      target_entity_id TEXT NOT NULL REFERENCES entity(id) ON DELETE CASCADE,
+      relation_type TEXT NOT NULL,
+      claim_id TEXT REFERENCES claim(id) ON DELETE SET NULL,
+      weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CHECK (source_entity_id <> target_entity_id),
+      UNIQUE (source_entity_id, target_entity_id, relation_type, claim_id)
     )
   `;
 
@@ -147,8 +194,12 @@ export async function cleanTestDb() {
   await sql`DELETE FROM entry_source`;
   await sql`DELETE FROM entry_tag`;
   await sql`DELETE FROM entry_domain`;
+  await sql`DELETE FROM kg_relation`;
+  await sql`DELETE FROM entity`;
+  await sql`DELETE FROM verify_queue`;
+  await sql`DELETE FROM entry_score`;
+  await sql`DELETE FROM claim`;
   await sql`DELETE FROM retry_queue`;
-  await sql`DELETE FROM crawl_domain`;
   await sql`DELETE FROM entry`;
 }
 

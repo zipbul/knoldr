@@ -146,29 +146,101 @@ async function migrate() {
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_retry_queue_next ON retry_queue(next_retry_at) WHERE attempts < 3`;
 
+  // Drop obsolete table from prior crawler architecture
+  await sql`DROP TABLE IF EXISTS crawl_domain`;
+
   // ============================================================
-  // crawl_domain (Deep Crawl Engine)
+  // claim (v0.3) — atomic assertions extracted from entries
   // ============================================================
   await sql`
-    CREATE TABLE IF NOT EXISTS crawl_domain (
-      domain TEXT PRIMARY KEY,
-      source_type TEXT NOT NULL DEFAULT 'unknown',
-      trust DOUBLE PRECISION NOT NULL DEFAULT 0.1 CHECK (trust >= 0 AND trust <= 1),
-      blocked BOOLEAN NOT NULL DEFAULT false,
-      block_reason TEXT,
-      rate_limit_ms INTEGER NOT NULL DEFAULT 2000,
-      robots_txt TEXT,
-      robots_fetched_at TIMESTAMPTZ,
-      config JSONB,
-      total_crawled INTEGER NOT NULL DEFAULT 0,
-      total_success INTEGER NOT NULL DEFAULT 0,
-      last_crawled_at TIMESTAMPTZ,
+    CREATE TABLE IF NOT EXISTS claim (
+      id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      entry_created_at TIMESTAMPTZ NOT NULL,
+      statement TEXT NOT NULL CHECK (length(statement) <= 2000),
+      type TEXT NOT NULL CHECK (type IN ('factual', 'subjective', 'predictive', 'normative')),
+      verdict TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not_applicable')),
+      certainty DOUBLE PRECISION NOT NULL DEFAULT 0.0 CHECK (certainty >= 0 AND certainty <= 1),
+      evidence JSONB,
+      embedding vector(384) NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      FOREIGN KEY (entry_id, entry_created_at)
+        REFERENCES entry(id, created_at) ON DELETE CASCADE
     )
   `;
-  await sql`CREATE INDEX IF NOT EXISTS idx_crawl_domain_blocked ON crawl_domain(blocked)`;
-  await sql`CREATE INDEX IF NOT EXISTS idx_crawl_domain_source_type ON crawl_domain(source_type)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_claim_entry ON claim(entry_id, entry_created_at)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_claim_type_verdict ON claim(type, verdict)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_claim_embedding ON claim USING hnsw(embedding vector_cosine_ops)`;
+
+  // ============================================================
+  // verify_queue (v0.3)
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS verify_queue (
+      claim_id TEXT PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+      queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      priority INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_verify_queue_next ON verify_queue(priority DESC, next_attempt_at) WHERE attempts < 3`;
+
+  // ============================================================
+  // entry_score (v0.3) — per-entry derived dimensions
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS entry_score (
+      entry_id TEXT NOT NULL,
+      entry_created_at TIMESTAMPTZ NOT NULL,
+      dimension TEXT NOT NULL CHECK (dimension IN ('factuality', 'novelty', 'actionability', 'signal')),
+      value DOUBLE PRECISION NOT NULL CHECK (value >= 0 AND value <= 1),
+      scored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      scored_by TEXT NOT NULL DEFAULT 'system',
+      PRIMARY KEY (entry_id, entry_created_at, dimension),
+      FOREIGN KEY (entry_id, entry_created_at)
+        REFERENCES entry(id, created_at) ON DELETE CASCADE
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_entry_score_dimension ON entry_score(dimension, value)`;
+
+  // ============================================================
+  // entity (v0.4) — Knowledge Graph nodes
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS entity (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL CHECK (length(name) <= 200),
+      type TEXT NOT NULL CHECK (length(type) <= 50),
+      aliases TEXT[] NOT NULL DEFAULT '{}',
+      metadata JSONB,
+      embedding vector(384) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_entity_name ON entity(name)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_entity_type ON entity(type)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_entity_embedding ON entity USING hnsw(embedding vector_cosine_ops)`;
+
+  // ============================================================
+  // kg_relation (v0.4) — Knowledge Graph edges
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS kg_relation (
+      id TEXT PRIMARY KEY,
+      source_entity_id TEXT NOT NULL REFERENCES entity(id) ON DELETE CASCADE,
+      target_entity_id TEXT NOT NULL REFERENCES entity(id) ON DELETE CASCADE,
+      relation_type TEXT NOT NULL,
+      claim_id TEXT REFERENCES claim(id) ON DELETE SET NULL,
+      weight DOUBLE PRECISION NOT NULL DEFAULT 1.0 CHECK (weight >= 0 AND weight <= 1),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CHECK (source_entity_id <> target_entity_id),
+      UNIQUE (source_entity_id, target_entity_id, relation_type, claim_id)
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_source ON kg_relation(source_entity_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_target ON kg_relation(target_entity_id)`;
 
   logger.info("migrations complete");
   await sql.end();

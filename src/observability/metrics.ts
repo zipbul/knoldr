@@ -1,4 +1,4 @@
-import { Registry, Counter, Histogram, Gauge, collectDefaultMetrics } from "prom-client";
+import { Registry, Counter, Histogram, collectDefaultMetrics } from "prom-client";
 
 const register = new Registry();
 collectDefaultMetrics({ register });
@@ -35,30 +35,6 @@ export const feedbackTotal = new Counter({
   name: "knoldr_feedback_total",
   help: "Total feedback operations",
   labelNames: ["signal"] as const,
-  registers: [register],
-});
-
-// Entry count gauge
-export const entryCount = new Gauge({
-  name: "knoldr_entry_count",
-  help: "Current entry count",
-  labelNames: ["status"] as const,
-  registers: [register],
-});
-
-// API health gauge
-export const apiHealth = new Gauge({
-  name: "knoldr_api_health",
-  help: "External API health status (1=up, 0=down)",
-  labelNames: ["provider", "status"] as const,
-  registers: [register],
-});
-
-// Research metrics
-export const researchTotal = new Counter({
-  name: "knoldr_research_total",
-  help: "Total research operations",
-  labelNames: ["status"] as const,
   registers: [register],
 });
 

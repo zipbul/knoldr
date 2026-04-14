@@ -33,6 +33,7 @@ export interface ScoreBreakdown {
   relevance: number;
   authority: number;
   freshness: number;
+  termCoverage: number;
   final: number;
 }
 
@@ -47,8 +48,17 @@ export interface RankResult {
  *
  * Query mode:  final = relevance * 0.5 + authority * 0.2 + freshness * 0.3
  * Explore mode: final = authority * 0.4 + freshness * 0.6 (no relevance)
+ *
+ * termCoverage: fraction of query terms (lowercased substring) present in
+ * title+content. Used by callers (find skill) to detect weak OR-matches
+ * that passed FTS on a single incidental term. When queryTerms is empty,
+ * defaults to 1.0 (no signal available, don't penalize).
  */
-export function rank(rows: RawRow[], mode: "query" | "explore"): RankResult {
+export function rank(
+  rows: RawRow[],
+  mode: "query" | "explore",
+  queryTerms: string[] = [],
+): RankResult {
   if (rows.length === 0) {
     return { entries: [], scores: [], trustLevels: [] };
   }
@@ -61,6 +71,10 @@ export function rank(rows: RawRow[], mode: "query" | "explore"): RankResult {
   const maxScore = Math.max(...rawScores);
   const scoreRange = maxScore - minScore;
 
+  const normalizedTerms = queryTerms
+    .map((t) => t.toLowerCase())
+    .filter((t) => t.length > 0);
+
   const scored = rows.map((row) => {
     const relevance =
       mode === "explore"
@@ -70,8 +84,22 @@ export function rank(rows: RawRow[], mode: "query" | "explore"): RankResult {
           : (row.pgroongaScore - minScore) / scoreRange;
 
     const authority = row.authority;
-    const daysSinceCreation = (now - row.createdAt.getTime()) / (1000 * 60 * 60 * 24);
-    const freshness = Math.exp(-row.decayRate * daysSinceCreation);
+    // Use publication date from source metadata when available; fall back to
+    // ingest time. Without this, a 10-year-old paper ingested today scores
+    // as "fresh" because createdAt = now.
+    const referenceDate = extractPublishedAt(row.metadata) ?? row.createdAt;
+    const daysSinceReference = Math.max(
+      0,
+      (now - referenceDate.getTime()) / (1000 * 60 * 60 * 24),
+    );
+    const freshness = Math.exp(-row.decayRate * daysSinceReference);
+
+    let termCoverage = 1.0;
+    if (normalizedTerms.length > 0) {
+      const text = `${row.title} ${row.content}`.toLowerCase();
+      const matched = normalizedTerms.filter((t) => text.includes(t)).length;
+      termCoverage = matched / normalizedTerms.length;
+    }
 
     const final =
       mode === "query"
@@ -95,7 +123,7 @@ export function rank(rows: RawRow[], mode: "query" | "explore"): RankResult {
         tags: row.tags,
         sources: row.sources,
       },
-      score: { relevance, authority, freshness, final },
+      score: { relevance, authority, freshness, termCoverage, final },
       trustLevel,
     };
   });
@@ -114,4 +142,12 @@ function getTrustLevel(authority: number): string {
   if (authority >= 0.7) return "high";
   if (authority >= 0.4) return "medium";
   return "low";
+}
+
+function extractPublishedAt(metadata: unknown): Date | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const raw = (metadata as Record<string, unknown>).publishedAt;
+  if (typeof raw !== "string") return null;
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d;
 }

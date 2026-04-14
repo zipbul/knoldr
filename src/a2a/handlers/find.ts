@@ -48,16 +48,30 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
     cursor: validated.cursor,
   });
 
-  // Enough results → return immediately
+  // Enough results AND top match actually covers the query → return.
+  // OR-based FTS (search.ts) can return entries that share only one
+  // incidental query term (e.g. "2023"); count alone is not a quality
+  // signal. termCoverage from rank.ts expresses how much of the query
+  // the top entry actually covers.
   const MIN_RESULTS = 3;
-  if (firstResult.entries.length >= MIN_RESULTS || validated.cursor) {
+  const MIN_TOP_COVERAGE = 0.4;
+  const topCoverage = firstResult.scores[0]?.termCoverage ?? 0;
+  const enoughResults = firstResult.entries.length >= MIN_RESULTS;
+  const strongTopMatch = topCoverage >= MIN_TOP_COVERAGE;
+  if (validated.cursor || (enoughResults && strongTopMatch)) {
     return formatResult(firstResult, false);
   }
 
   // Step 2: auto-research to collect new data
   logger.info(
-    { query: queryText, found: firstResult.entries.length, minResults: MIN_RESULTS },
-    "find: insufficient results, starting auto-research",
+    {
+      query: queryText,
+      found: firstResult.entries.length,
+      minResults: MIN_RESULTS,
+      topCoverage,
+      minTopCoverage: MIN_TOP_COVERAGE,
+    },
+    "find: insufficient or weak results, starting auto-research",
   );
 
   const researchResult = await research({
@@ -66,7 +80,12 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
   });
 
   logger.info(
-    { stored: researchResult.entries.filter((e) => e.action === "stored").length, urlsCrawled: researchResult.urlsCrawled },
+    {
+      urlsProcessed: researchResult.urlsProcessed,
+      entriesStored: researchResult.entriesStored,
+      entriesSkippedLowRelevance: researchResult.entriesSkippedLowRelevance,
+      entriesWithPublishedAt: researchResult.entriesWithPublishedAt,
+    },
     "find: auto-research completed",
   );
 
@@ -82,15 +101,24 @@ export async function handleFind(input: Record<string, unknown>): Promise<unknow
   });
 
   return formatResult(finalResult, true, {
-    urlsCrawled: researchResult.urlsCrawled,
-    entriesStored: researchResult.entries.filter((e) => e.action === "stored").length,
+    urlsProcessed: researchResult.urlsProcessed,
+    entriesStored: researchResult.entriesStored,
+    entriesSkippedLowRelevance: researchResult.entriesSkippedLowRelevance,
+    entriesWithPublishedAt: researchResult.entriesWithPublishedAt,
   });
+}
+
+interface ResearchStats {
+  urlsProcessed: number;
+  entriesStored: number;
+  entriesSkippedLowRelevance: number;
+  entriesWithPublishedAt: number;
 }
 
 function formatResult(
   result: SearchResult,
   researched: boolean,
-  researchStats?: { urlsCrawled: number; entriesStored: number },
+  researchStats?: ResearchStats,
 ) {
   return {
     entries: result.entries,

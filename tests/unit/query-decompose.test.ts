@@ -1,8 +1,10 @@
 import { describe, expect, test, beforeAll } from "bun:test";
 import { decomposeQuery } from "../../src/collect/query-decompose";
 
-// Use a command that exits immediately with failure to trigger fallback
+// Force both CLIs to fail so fallbackQueries() is exercised.
+// `false` is a POSIX command that always exits non-zero.
 beforeAll(() => {
+  process.env.KNOLDR_CODEX_CLI = "false";
   process.env.KNOLDR_GEMINI_CLI = "false";
 });
 

@@ -4,19 +4,30 @@ const LANGSEARCH_ENDPOINT = "https://api.langsearch.com/v1/web-search";
 const SEARCH_DELAY_MS = 500;
 let lastSearchTime = 0;
 
+export interface SearchHit {
+  url: string;
+  title: string;
+  summary: string;
+  publishedAt?: string;
+  siteName?: string;
+}
+
 interface LangSearchResponse {
   data?: {
     webPages?: {
-      value?: Array<{ url?: string }>;
+      value?: Array<{
+        url?: string;
+        name?: string;
+        snippet?: string;
+        summary?: string;
+        datePublished?: string;
+        siteName?: string;
+      }>;
     };
   };
 }
 
-/**
- * Query LangSearch web search API.
- * Returns up to 10 high-quality URLs per query.
- */
-async function queryLangSearch(query: string): Promise<string[]> {
+async function queryLangSearch(query: string): Promise<SearchHit[]> {
   const apiKey = process.env.LANGSEARCH_API_KEY;
   if (!apiKey) {
     logger.error("LANGSEARCH_API_KEY not configured");
@@ -30,7 +41,7 @@ async function queryLangSearch(query: string): Promise<string[]> {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query, count: 10 }),
+      body: JSON.stringify({ query, count: 10, summary: true }),
       signal: AbortSignal.timeout(15000),
     });
 
@@ -40,26 +51,44 @@ async function queryLangSearch(query: string): Promise<string[]> {
     }
 
     const json = (await res.json()) as LangSearchResponse;
-    const urls = (json.data?.webPages?.value ?? [])
-      .map((p) => p.url ?? "")
-      .filter((u) => u.startsWith("http"));
+    const hits: SearchHit[] = [];
+    for (const p of json.data?.webPages?.value ?? []) {
+      if (!p.url || !p.url.startsWith("http")) continue;
+      const title = (p.name ?? "").trim();
+      const summary = (p.summary ?? p.snippet ?? "").trim();
+      if (!title && !summary) continue;
+      hits.push({
+        url: p.url,
+        title: title || p.url,
+        summary,
+        publishedAt: normalizeDate(p.datePublished),
+        siteName: p.siteName?.trim() || undefined,
+      });
+    }
 
-    logger.debug({ query, count: urls.length }, "LangSearch returned results");
-    return urls;
+    logger.debug({ query, count: hits.length }, "LangSearch returned results");
+    return hits;
   } catch (err) {
     logger.warn({ query, error: (err as Error).message }, "LangSearch request failed");
     return [];
   }
 }
 
+function normalizeDate(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
 /**
- * Collect seed URLs from multiple search queries via LangSearch.
+ * Collect search hits (URL + title + summary + publishedAt) from sub-queries.
+ * De-duplicates by URL; prefers the first hit encountered.
  */
-export async function collectSeedUrls(
+export async function collectSearchHits(
   subQueries: Array<{ main: string; expansions: string[] }>,
   focusDomains?: string[],
-): Promise<string[]> {
-  const allUrls = new Set<string>();
+): Promise<SearchHit[]> {
+  const byUrl = new Map<string, SearchHit>();
 
   const queries: string[] = [];
   for (const sq of subQueries) {
@@ -76,30 +105,28 @@ export async function collectSeedUrls(
     }
     lastSearchTime = Date.now();
 
-    const urls = await queryLangSearch(query);
-    for (const url of urls) {
-      allUrls.add(url);
+    const hits = await queryLangSearch(query);
+    for (const hit of hits) {
+      if (!byUrl.has(hit.url)) byUrl.set(hit.url, hit);
     }
   }
 
-  // Prioritize focus domains
-  if (focusDomains && focusDomains.length > 0) {
-    const focused: string[] = [];
-    const rest: string[] = [];
-    for (const url of allUrls) {
-      try {
-        const hostname = new URL(url).hostname;
-        if (focusDomains.some((d) => hostname === d || hostname.endsWith(`.${d}`))) {
-          focused.push(url);
-        } else {
-          rest.push(url);
-        }
-      } catch {
-        rest.push(url);
+  const all = [...byUrl.values()];
+  if (!focusDomains || focusDomains.length === 0) return all;
+
+  const focused: SearchHit[] = [];
+  const rest: SearchHit[] = [];
+  for (const hit of all) {
+    try {
+      const hostname = new URL(hit.url).hostname;
+      if (focusDomains.some((d) => hostname === d || hostname.endsWith(`.${d}`))) {
+        focused.push(hit);
+      } else {
+        rest.push(hit);
       }
+    } catch {
+      rest.push(hit);
     }
-    return [...focused, ...rest];
   }
-
-  return [...allUrls];
+  return [...focused, ...rest];
 }

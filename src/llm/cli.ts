@@ -10,18 +10,19 @@ interface CliConfig {
   mode: "codex" | "generic"; // codex uses -o file + stdin, generic uses -p + stdout
 }
 
-// Verified by direct probe against live CLIs:
+// Verified against OpenAI Codex docs + gemini CLI probe:
 //
-// - Codex v0.120.0 on a ChatGPT Plus OAuth session accepts only the
-//   plan's default tier (`gpt-5`/`gpt-5.4`). Every cheaper model
-//   (`gpt-5-mini`, `gpt-4o-mini`, `o4-mini`, ...) is rejected with
-//   `"not supported when using Codex with a ChatGPT account"`. So
-//   leave the model empty and let codex pick its own default.
-// - Gemini CLI v0.37.2 accepts `gemini-2.5-flash-lite` as a live
-//   model with its own quota bucket (separate from `gemini-2.5-flash`,
-//   which we exhausted earlier). Flash-lite is also the right pick for
-//   structured-JSON extraction workload knoldr runs.
-const CODEX_MODEL = "";
+// - Codex on ChatGPT Plus accepts `gpt-5.4`, `gpt-5.4-mini`,
+//   `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`. The common
+//   API-style names (`gpt-5-mini`, `gpt-4o-mini`, `o4-mini`, …) are
+//   rejected because Codex uses its own Codex-tier naming. `gpt-5.4-mini`
+//   is the efficient pick for knoldr's JSON-extraction workload —
+//   running this on the default `gpt-5.4` burned the Plus daily cap
+//   in a single research storm.
+// - Gemini CLI v0.37.2 accepts `gemini-2.5-flash-lite` with its own
+//   quota bucket (separate from `gemini-2.5-flash`). Right pick for
+//   the same reason.
+const CODEX_MODEL = "gpt-5.4-mini";
 const GEMINI_MODEL = "gemini-2.5-flash-lite";
 
 function getCliConfigs(): CliConfig[] {

@@ -8,7 +8,7 @@ export const agentCard: AgentCard = {
   url: `http://${process.env.KNOLDR_HOST ?? "0.0.0.0"}:${process.env.KNOLDR_PORT ?? "5100"}`,
   version: "0.3.0",
   capabilities: {
-    streaming: false,
+    streaming: true,
     pushNotifications: false,
   },
   defaultInputModes: ["application/json"],

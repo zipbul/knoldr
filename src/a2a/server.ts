@@ -36,6 +36,10 @@ export function startServer() {
   const server = Bun.serve({
     port,
     hostname: host,
+    // `find` auto-research can run for minutes (LangSearch + LLM decompose +
+    // embed). Bun's default idleTimeout (10s) closes the SSE stream before
+    // the final event arrives, so raise it to cover the research budget.
+    idleTimeout: 255,
     async fetch(req) {
       const url = new URL(req.url);
       const path = url.pathname;
@@ -74,11 +78,10 @@ export function startServer() {
           const handler = getTransportHandler();
           const result = await handler.handle(body);
 
-          // handle() returns JSONRPCResponse or AsyncGenerator
+          // handle() returns JSONRPCResponse for `message/send` or an
+          // AsyncGenerator for `message/stream`/`tasks/resubscribe`.
           if (isAsyncGenerator(result)) {
-            // Streaming not supported in v0.2, collect first result
-            const first = await result.next();
-            return Response.json(first.value);
+            return streamSse(result);
           }
 
           return Response.json(result);
@@ -133,4 +136,49 @@ export function startServer() {
 
 function isAsyncGenerator(obj: unknown): obj is AsyncGenerator {
   return obj !== null && typeof obj === "object" && Symbol.asyncIterator in (obj as object);
+}
+
+/** Forward an A2A SDK AsyncGenerator as a text/event-stream response.
+ * Emits an SSE comment line every KEEPALIVE_MS so the TCP connection
+ * does not hit Bun's idleTimeout between executor events. */
+function streamSse(gen: AsyncGenerator<unknown>): Response {
+  const encoder = new TextEncoder();
+  const KEEPALIVE_MS = 15_000;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const keepalive = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(`: keepalive\n\n`));
+        } catch {
+          // controller may already be closed
+        }
+      }, KEEPALIVE_MS);
+
+      try {
+        for await (const event of gen) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        }
+      } catch (err) {
+        const payload = {
+          jsonrpc: "2.0",
+          error: { code: -32603, message: (err as Error).message },
+          id: null,
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+        logger.error({ error: (err as Error).message }, "A2A stream failed");
+      } finally {
+        clearInterval(keepalive);
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }

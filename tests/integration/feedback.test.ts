@@ -49,11 +49,14 @@ afterAll(async () => {
 let entryCounter = 0;
 async function createTestEntry() {
   entryCounter++;
+  // fakeEmbedding in mock-apis.ts hashes only the first 384 chars position
+  // by position, so varying tokens must appear early in the string to
+  // yield distinct vectors. Put the unique id at the very start.
   const uniqueId = `${entryCounter}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const input = parseStoreInput({
     entries: [{
-      title: `Feedback Test Entry ${uniqueId}`,
-      content: `Completely unique and different content for feedback testing. Identifier: ${uniqueId}. This text must produce a unique embedding vector that does not collide with any other entry in the test database.`,
+      title: `${uniqueId} Feedback Test Entry`,
+      content: `${uniqueId} Completely unique and different content for feedback testing.`,
       domain: [`testing-${entryCounter}`],
     }],
     sources: [{ url: "https://docs.example.com", sourceType: "official_docs" }],

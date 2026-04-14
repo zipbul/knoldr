@@ -2,11 +2,15 @@ import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test
 import { setupTestDb, cleanTestDb, teardownTestDb } from "../helpers/db";
 import { startMockEmbeddingServer, stopMockServers, MOCK_CODEX_CLI } from "../helpers/mock-apis";
 
-process.env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/knoldr_test";
+process.env.TEST_DATABASE_URL =
+  process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/knoldr_test";
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
 process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
+// Gemini CLI is a real spawn; forcing /bin/false keeps fallback path
+// quick and deterministic for anything the mock codex does not handle.
+process.env.KNOLDR_GEMINI_CLI = "false";
 process.env.KNOLDR_PORT = "19960";
 process.env.KNOLDR_API_TOKEN = "test-token";
 
@@ -64,31 +68,46 @@ afterAll(async () => {
   if (dbAvailable) await teardownTestDb();
 });
 
+// ============================================================
+// Agent Card
+// ============================================================
 describe("A2A — Agent Card", () => {
-  test("GET /.well-known/agent-card.json returns agent card", async () => {
+  test("exposes only `find` and `feedback` skills", async () => {
     if (!dbAvailable) return;
 
     const res = await fetch(`${A2A_URL}/.well-known/agent-card.json`);
     expect(res.status).toBe(200);
-    const card = await res.json();
+    const card = (await res.json()) as {
+      name: string;
+      capabilities: { streaming: boolean };
+      skills: Array<{ id: string }>;
+    };
     expect(card.name).toBe("knoldr");
-    expect(card.skills.length).toBe(6);
+    expect(card.capabilities.streaming).toBe(true);
+    const ids = card.skills.map((s) => s.id).sort();
+    expect(ids).toEqual(["feedback", "find"]);
   });
 });
 
+// ============================================================
+// Health
+// ============================================================
 describe("A2A — Health", () => {
-  test("GET /health returns status", async () => {
+  test("GET /health reports db up", async () => {
     if (!dbAvailable) return;
 
     const res = await fetch(`${A2A_URL}/health`);
     expect(res.status).toBe(200);
-    const health = await res.json();
+    const health = (await res.json()) as { db: string };
     expect(health.db).toBe("up");
   });
 });
 
+// ============================================================
+// Auth
+// ============================================================
 describe("A2A — Auth", () => {
-  test("rejects request without token", async () => {
+  test("rejects request without bearer token", async () => {
     if (!dbAvailable) return;
 
     const res = await fetch(`${A2A_URL}/a2a`, {
@@ -96,94 +115,193 @@ describe("A2A — Auth", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         jsonrpc: "2.0",
-        id: "req-1",
+        id: "req-noauth",
         method: "message/send",
-        params: { message: { kind: "message", messageId: "m1", role: "user", parts: [{ kind: "data", data: { skill: "audit", input: {} } }] } },
+        params: {
+          message: {
+            kind: "message",
+            messageId: "m-noauth",
+            role: "user",
+            parts: [{ kind: "data", data: { skill: "find", input: { query: "x" } } }],
+          },
+        },
       }),
     });
     expect(res.status).toBe(401);
   });
 });
 
-describe("A2A — Store", () => {
-  test("stores structured entry via A2A", async () => {
+// ============================================================
+// find — core search skill
+// ============================================================
+describe("A2A — find", () => {
+  test("returns stored entries as a shaped response", async () => {
     if (!dbAvailable) return;
 
-    const result = await a2aSend("store", {
-      entries: [
-        {
-          title: "A2A Store Test",
-          content: "Content stored via A2A protocol",
-          domain: ["testing"],
-          tags: ["a2a"],
-        },
-      ],
-    }) as { result?: { parts?: Array<{ data?: { entries?: Array<{ action: string }> } }> } };
+    // Seed an entry directly through the ingest engine so find has something
+    // to return without triggering auto-research (which would hit the
+    // network in an integration run).
+    const { ingest } = await import("../../src/ingest/engine");
+    const { parseStoreInput } = await import("../../src/ingest/validate");
+    const seeded = await ingest(
+      parseStoreInput({
+        entries: [
+          {
+            title: "pgvector HNSW index tuning notes",
+            content:
+              "pgvector supports HNSW indexes. Tune ef_construction and m parameters for recall/latency trade-off.",
+            domain: ["pgvector"],
+            tags: ["hnsw"],
+            language: "en",
+          },
+          {
+            title: "pgvector approximate nearest neighbor",
+            content:
+              "Approximate nearest neighbor search via HNSW indexes in pgvector improves query latency substantially.",
+            domain: ["pgvector"],
+            tags: ["ann"],
+            language: "en",
+          },
+          {
+            title: "pgvector ivfflat background",
+            content:
+              "ivfflat is the other pgvector index family; HNSW usually wins for high-dimensional recall.",
+            domain: ["pgvector"],
+            tags: ["ivfflat"],
+            language: "en",
+          },
+        ],
+      }),
+    );
+    expect(seeded.filter((r) => r.action === "stored").length).toBeGreaterThanOrEqual(3);
 
-    const data = result.result?.parts?.[0]?.data;
-    expect(data?.entries?.[0]?.action).toBe("stored");
-  });
-});
-
-describe("A2A — Query", () => {
-  test("queries entries via A2A", async () => {
-    if (!dbAvailable) return;
-
-    // Store first
-    await a2aSend("store", {
-      entries: [{ title: "Bun runtime", content: "Bun is fast JavaScript runtime", domain: ["javascript"] }],
-    });
-
-    const result = await a2aSend("query", { query: "Bun runtime" }) as {
-      result?: { parts?: Array<{ data?: { entries?: unknown[] } }> };
+    const result = (await a2aSend("find", {
+      query: "pgvector HNSW",
+      limit: 5,
+    })) as {
+      result?: {
+        parts?: Array<{
+          data?: {
+            entries?: Array<{ id: string; title: string }>;
+            researched?: boolean;
+          };
+        }>;
+      };
     };
 
     const data = result.result?.parts?.[0]?.data;
+    expect(data).toBeDefined();
     expect(data?.entries).toBeArray();
+    expect((data?.entries ?? []).length).toBeGreaterThan(0);
+    expect(typeof data?.researched).toBe("boolean");
   });
 });
 
-describe("A2A — Explore", () => {
-  test("explores entries via A2A", async () => {
+// ============================================================
+// feedback — authority adjustment skill
+// ============================================================
+describe("A2A — feedback", () => {
+  test("applies positive feedback and increases authority", async () => {
     if (!dbAvailable) return;
 
-    await a2aSend("store", {
-      entries: [{ title: "Explore via A2A", content: "Explore test content", domain: ["a2a-test"] }],
-    });
+    const { ingest } = await import("../../src/ingest/engine");
+    const { parseStoreInput } = await import("../../src/ingest/validate");
+    const seeded = await ingest(
+      parseStoreInput({
+        entries: [
+          {
+            title: "Feedback test entry",
+            content:
+              "Entry used to exercise the feedback skill end to end via A2A.",
+            domain: ["testing"],
+            language: "en",
+          },
+        ],
+        sources: [{ url: "https://docs.example.com", sourceType: "official_docs" }],
+      }),
+    );
+    const entryId = seeded[0]!.entryId;
+    expect(entryId).toBeTruthy();
 
-    const result = await a2aSend("explore", { domain: "a2a-test" }) as {
-      result?: { parts?: Array<{ data?: { entries?: unknown[] } }> };
+    const first = (await a2aSend("feedback", {
+      entryId,
+      signal: "positive",
+      agentId: "integration-agent-1",
+    })) as {
+      result?: { parts?: Array<{ data?: { ok?: boolean; newAuthority?: number } }> };
     };
-
-    const data = result.result?.parts?.[0]?.data;
-    expect(data?.entries).toBeArray();
+    const firstData = first.result?.parts?.[0]?.data;
+    expect(firstData?.ok).toBe(true);
+    expect(firstData?.newAuthority).toBeGreaterThan(0.8);
   });
-});
 
-describe("A2A — Audit", () => {
-  test("returns system stats via A2A", async () => {
+  test("rate-limits the same agent on the same entry", async () => {
     if (!dbAvailable) return;
 
-    const result = await a2aSend("audit") as {
-      result?: { parts?: Array<{ data?: { totalEntries?: number } }> };
+    const { ingest } = await import("../../src/ingest/engine");
+    const { parseStoreInput } = await import("../../src/ingest/validate");
+    const seeded = await ingest(
+      parseStoreInput({
+        entries: [
+          {
+            title: "Rate-limit fixture entry",
+            content: "Another unique content body for a fresh embedding.",
+            domain: ["testing"],
+            language: "en",
+          },
+        ],
+      }),
+    );
+    const entryId = seeded[0]!.entryId;
+
+    const first = (await a2aSend("feedback", {
+      entryId,
+      signal: "positive",
+      agentId: "rate-limit-agent",
+    })) as {
+      result?: { parts?: Array<{ data?: { ok?: boolean } }> };
     };
+    expect(first.result?.parts?.[0]?.data?.ok).toBe(true);
 
+    const second = (await a2aSend("feedback", {
+      entryId,
+      signal: "negative",
+      agentId: "rate-limit-agent",
+    })) as {
+      result?: {
+        parts?: Array<{ data?: { ok?: boolean; error?: string } }>;
+      };
+    };
+    const secondData = second.result?.parts?.[0]?.data;
+    expect(secondData?.ok).toBe(false);
+    expect(secondData?.error).toBe("rate_limited");
+  });
+
+  test("reports invalid_input for bad payloads", async () => {
+    if (!dbAvailable) return;
+
+    const result = (await a2aSend("feedback", {
+      // Missing entryId / agentId; signal is a bogus value.
+      signal: "maybe",
+    })) as {
+      result?: { parts?: Array<{ data?: { ok?: boolean; error?: string } }> };
+    };
     const data = result.result?.parts?.[0]?.data;
-    expect(data).toHaveProperty("totalEntries");
-    expect(data).toHaveProperty("activeEntries");
-    expect(data).toHaveProperty("ingestion");
+    expect(data?.ok).toBe(false);
+    expect(data?.error).toBe("invalid_input");
   });
 });
 
-describe("A2A — Unknown skill", () => {
-  test("returns error for unknown skill", async () => {
+// ============================================================
+// Dispatcher
+// ============================================================
+describe("A2A — unknown skill", () => {
+  test("returns a typed error message", async () => {
     if (!dbAvailable) return;
 
-    const result = await a2aSend("nonexistent") as {
+    const result = (await a2aSend("does-not-exist")) as {
       result?: { parts?: Array<{ data?: { error?: string } }> };
     };
-
-    const data = result.result?.parts?.[0]?.data;
-    expect(data?.error).toContain("Unknown skill");
+    expect(result.result?.parts?.[0]?.data?.error).toContain("Unknown skill");
   });
 });

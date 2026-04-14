@@ -156,6 +156,32 @@ export async function setupTestDb() {
     )
   `;
 
+  // v0.4: entity + kg_relation
+  await sql`
+    CREATE TABLE IF NOT EXISTS entity (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      aliases TEXT[] NOT NULL DEFAULT '{}',
+      metadata JSONB,
+      embedding vector(384) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS kg_relation (
+      id TEXT PRIMARY KEY,
+      source_entity_id TEXT NOT NULL REFERENCES entity(id) ON DELETE CASCADE,
+      target_entity_id TEXT NOT NULL REFERENCES entity(id) ON DELETE CASCADE,
+      relation_type TEXT NOT NULL,
+      claim_id TEXT REFERENCES claim(id) ON DELETE SET NULL,
+      weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CHECK (source_entity_id <> target_entity_id),
+      UNIQUE (source_entity_id, target_entity_id, relation_type, claim_id)
+    )
+  `;
+
   // pgroonga index
   await sql`CREATE INDEX IF NOT EXISTS idx_entry_fulltext ON entry USING pgroonga(title, content)`;
 }
@@ -168,6 +194,8 @@ export async function cleanTestDb() {
   await sql`DELETE FROM entry_source`;
   await sql`DELETE FROM entry_tag`;
   await sql`DELETE FROM entry_domain`;
+  await sql`DELETE FROM kg_relation`;
+  await sql`DELETE FROM entity`;
   await sql`DELETE FROM verify_queue`;
   await sql`DELETE FROM entry_score`;
   await sql`DELETE FROM claim`;

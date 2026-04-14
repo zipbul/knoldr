@@ -143,6 +143,19 @@ export function startServer() {
     }
   }, 30 * 1000);
 
+  // KG triple extraction worker — every 60 seconds
+  // Picks verified factual claims without kg_relation rows and extracts
+  // (subject, predicate, object) triples. Runs after verify_queue so
+  // only evidence-backed assertions populate the graph.
+  setInterval(async () => {
+    try {
+      const { processKgExtractionQueue } = await import("../kg/extract-queue");
+      await processKgExtractionQueue();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "KG extraction worker failed");
+    }
+  }, 60 * 1000);
+
   // Claim verify queue processor — every 2 minutes
   // Pulls a small batch of factual claims, adjudicates via db_cross_ref +
   // LLM judgment (see src/claim/verify.ts), updates verdict/certainty,

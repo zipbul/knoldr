@@ -205,6 +205,43 @@ async function migrate() {
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_entry_score_dimension ON entry_score(dimension, value)`;
 
+  // ============================================================
+  // entity (v0.4) — Knowledge Graph nodes
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS entity (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL CHECK (length(name) <= 200),
+      type TEXT NOT NULL CHECK (length(type) <= 50),
+      aliases TEXT[] NOT NULL DEFAULT '{}',
+      metadata JSONB,
+      embedding vector(384) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_entity_name ON entity(name)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_entity_type ON entity(type)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_entity_embedding ON entity USING hnsw(embedding vector_cosine_ops)`;
+
+  // ============================================================
+  // kg_relation (v0.4) — Knowledge Graph edges
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS kg_relation (
+      id TEXT PRIMARY KEY,
+      source_entity_id TEXT NOT NULL REFERENCES entity(id) ON DELETE CASCADE,
+      target_entity_id TEXT NOT NULL REFERENCES entity(id) ON DELETE CASCADE,
+      relation_type TEXT NOT NULL,
+      claim_id TEXT REFERENCES claim(id) ON DELETE SET NULL,
+      weight DOUBLE PRECISION NOT NULL DEFAULT 1.0 CHECK (weight >= 0 AND weight <= 1),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CHECK (source_entity_id <> target_entity_id),
+      UNIQUE (source_entity_id, target_entity_id, relation_type, claim_id)
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_source ON kg_relation(source_entity_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_target ON kg_relation(target_entity_id)`;
+
   logger.info("migrations complete");
   await sql.end();
 }

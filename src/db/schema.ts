@@ -273,6 +273,71 @@ export const verifyQueue = pgTable(
 );
 
 // ============================================================
+// entity — Knowledge Graph nodes (v0.4)
+// ============================================================
+export const entity = pgTable(
+  "entity",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    type: text("type").notNull(),
+    aliases: text("aliases")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    metadata: jsonb("metadata"),
+    embedding: vector("embedding").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("entity_name_len", sql`length(${t.name}) <= 200`),
+    check("entity_type_len", sql`length(${t.type}) <= 50`),
+    index("idx_entity_name").on(t.name),
+    index("idx_entity_type").on(t.type),
+    // pgvector hnsw index created via raw SQL in migration.
+  ],
+);
+
+// ============================================================
+// kg_relation — Knowledge Graph edges (v0.4)
+// ============================================================
+export const kgRelation = pgTable(
+  "kg_relation",
+  {
+    id: text("id").primaryKey(),
+    sourceEntityId: text("source_entity_id").notNull(),
+    targetEntityId: text("target_entity_id").notNull(),
+    relationType: text("relation_type").notNull(),
+    claimId: text("claim_id"),
+    weight: doublePrecision("weight").notNull().default(1.0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.sourceEntityId],
+      foreignColumns: [entity.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [t.targetEntityId],
+      foreignColumns: [entity.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [t.claimId],
+      foreignColumns: [claim.id],
+    }).onDelete("set null"),
+    check("kg_relation_weight_range", sql`${t.weight} >= 0 AND ${t.weight} <= 1`),
+    check(
+      "kg_relation_no_self_loop",
+      sql`${t.sourceEntityId} <> ${t.targetEntityId}`,
+    ),
+    uniqueIndex("uniq_kg_relation_edge")
+      .on(t.sourceEntityId, t.targetEntityId, t.relationType, t.claimId),
+    index("idx_kg_relation_source").on(t.sourceEntityId),
+    index("idx_kg_relation_target").on(t.targetEntityId),
+  ],
+);
+
+// ============================================================
 // entry_score — Derived dimensions per entry (v0.3)
 // ============================================================
 // Composite PK (entry_id, entry_created_at, dimension). Partition-aware FK

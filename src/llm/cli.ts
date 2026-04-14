@@ -46,6 +46,40 @@ export async function callLlm(prompt: string): Promise<string> {
   throw lastError ?? new Error("No LLM CLI available");
 }
 
+export interface LlmVote {
+  cli: string;
+  output: string;
+}
+
+/**
+ * Invoke every configured CLI concurrently and return whichever finished
+ * successfully. Used by claim verification to produce a cheap
+ * cross-provider "jury" without a full Pyreez deliberation engine.
+ */
+export async function callAllLlms(prompt: string): Promise<LlmVote[]> {
+  const configs = getCliConfigs();
+  const settled = await Promise.allSettled(
+    configs.map(async (cli) => {
+      const output = await callSingleCli(cli, prompt);
+      return { cli: cli.name, output };
+    }),
+  );
+
+  const votes: LlmVote[] = [];
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i]!;
+    if (result.status === "fulfilled") {
+      votes.push(result.value);
+    } else {
+      logger.warn(
+        { cli: configs[i]!.name, error: (result.reason as Error).message },
+        "LLM CLI failed in parallel call",
+      );
+    }
+  }
+  return votes;
+}
+
 async function callSingleCli(cli: CliConfig, prompt: string): Promise<string> {
   if (cli.mode === "codex") {
     return callCodex(cli.command, cli.model, prompt);

@@ -1,5 +1,5 @@
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
-import type { Message } from "@a2a-js/sdk";
+import type { Message, TaskStatusUpdateEvent } from "@a2a-js/sdk";
 import { v4 as uuid } from "uuid";
 import { extractSkillRequest } from "./types";
 import { handleFind } from "./handlers/find";
@@ -8,6 +8,17 @@ import { logger } from "../observability/logger";
 
 const SUPPORTED_SKILLS = ["find", "feedback"] as const;
 type SupportedSkill = (typeof SUPPORTED_SKILLS)[number];
+
+/**
+ * Progress reporter threaded through long-running skills. Each call
+ * publishes a TaskStatusUpdateEvent with `state: "working"` and
+ * `final: false` so streaming clients see pipeline milestones in real
+ * time. Non-streaming `message/send` callers are unaffected because
+ * the SDK returns the terminal Message, not the status updates.
+ */
+export interface Progress {
+  emit(stage: string, data?: Record<string, unknown>): void;
+}
 
 function makeMessage(data: Record<string, unknown>): Message {
   return {
@@ -18,10 +29,38 @@ function makeMessage(data: Record<string, unknown>): Message {
   };
 }
 
-function runSkill(skill: SupportedSkill, input: Record<string, unknown>): Promise<unknown> {
+function makeStatusUpdate(
+  taskId: string,
+  contextId: string,
+  stage: string,
+  data: Record<string, unknown> | undefined,
+): TaskStatusUpdateEvent {
+  return {
+    kind: "status-update",
+    taskId,
+    contextId,
+    final: false,
+    status: {
+      state: "working",
+      timestamp: new Date().toISOString(),
+      message: {
+        kind: "message",
+        messageId: uuid(),
+        role: "agent",
+        parts: [{ kind: "data", data: { stage, ...(data ?? {}) } }],
+      },
+    },
+  };
+}
+
+function runSkill(
+  skill: SupportedSkill,
+  input: Record<string, unknown>,
+  progress: Progress,
+): Promise<unknown> {
   switch (skill) {
     case "find":
-      return handleFind(input);
+      return handleFind(input, progress);
     case "feedback":
       return handleFeedback(input) as Promise<unknown>;
   }
@@ -30,6 +69,13 @@ function runSkill(skill: SupportedSkill, input: Record<string, unknown>): Promis
 export class KnoldrExecutor implements AgentExecutor {
   async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
     const { userMessage, taskId } = requestContext;
+    const contextId = userMessage.contextId ?? uuid();
+
+    const progress: Progress = {
+      emit(stage, data) {
+        eventBus.publish(makeStatusUpdate(taskId, contextId, stage, data));
+      },
+    };
 
     try {
       const { skill, input } = extractSkillRequest(userMessage.parts);
@@ -43,8 +89,9 @@ export class KnoldrExecutor implements AgentExecutor {
       }
 
       logger.info({ skill, taskId }, "executing A2A skill");
+      progress.emit("started", { skill });
 
-      runSkill(skill as SupportedSkill, input)
+      runSkill(skill as SupportedSkill, input, progress)
         .then((result) => {
           eventBus.publish(makeMessage(result as Record<string, unknown>));
           eventBus.finished();

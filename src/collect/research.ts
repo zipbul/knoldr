@@ -1,11 +1,21 @@
 import { decomposeQuery } from "./query-decompose";
 import { collectSearchHits, type SearchHit } from "./search-scraper";
 import { ingest } from "../ingest/engine";
-import { parseStoreInput } from "../ingest/validate";
+import { parseStoreInput, type StoreInput } from "../ingest/validate";
 import { logger } from "../observability/logger";
 import type { Progress } from "../a2a/dispatcher";
 
 const NOOP_PROGRESS: Progress = { emit: () => {} };
+
+// Mode 2 short-circuit: LangSearch already returns a clean
+// {title, content} per result, so the LLM decompose step that used to
+// atomize raw web text is wasted work (and was the single biggest LLM
+// quota burner). Anything that fits Mode 2's 50_000-char content cap
+// is stored directly as a single structured entry; longer payloads
+// fall back to the raw → LLM-decompose path so they still get
+// atomized into multiple entries.
+const MODE2_CONTENT_LIMIT = 49_000;
+const TITLE_MAX = 500;
 
 export interface ResearchInput {
   topic: string;
@@ -89,10 +99,7 @@ export async function research(
     }
 
     try {
-      const storeInput = parseStoreInput({
-        raw: buildRawText(hit).slice(0, 200_000),
-        sources: [{ url: hit.url, sourceType: estimateSourceType(hit.url) }],
-      });
+      const storeInput = buildStoreInput(hit, input);
       const ingested = await ingest(storeInput);
       for (const r of ingested) {
         result.entries.push({ entryId: r.entryId, action: r.action });
@@ -126,8 +133,61 @@ export async function research(
   return result;
 }
 
+/**
+ * Pick the structured (Mode 2) ingest path when the LangSearch hit
+ * already fits in a single entry; only fall back to the raw → decompose
+ * path for very long content that genuinely needs atomization.
+ */
+function buildStoreInput(hit: SearchHit, input: ResearchInput): StoreInput {
+  const sources = [{ url: hit.url, sourceType: estimateSourceType(hit.url) }];
+
+  if (hit.content && hit.content.length <= MODE2_CONTENT_LIMIT) {
+    return parseStoreInput({
+      entries: [
+        {
+          title: hit.title.slice(0, TITLE_MAX),
+          content: hit.content,
+          domain: deriveDomains(hit, input),
+          language: "en",
+        },
+      ],
+      sources,
+    });
+  }
+
+  return parseStoreInput({
+    raw: buildRawText(hit).slice(0, 200_000),
+    sources,
+  });
+}
+
 function buildRawText(hit: SearchHit): string {
   return hit.content ? `${hit.title}\n\n${hit.content}` : hit.title;
+}
+
+function deriveDomains(hit: SearchHit, input: ResearchInput): string[] {
+  const candidates: string[] = [];
+  if (input.domain) candidates.push(input.domain);
+  candidates.push(...input.topic.split(/\s+/).slice(0, 3));
+  try {
+    candidates.push(new URL(hit.url).hostname.replace(/^www\./, "").split(".")[0] ?? "");
+  } catch {
+    /* ignore malformed URL */
+  }
+  const slugs = candidates
+    .map(slugify)
+    .filter((s): s is string => s.length > 0 && s.length <= 50);
+  const unique = Array.from(new Set(slugs)).slice(0, 5);
+  return unique.length > 0 ? unique : ["web"];
+}
+
+function slugify(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[_\s.]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "");
 }
 
 function passesTopicGate(hit: SearchHit, topicTerms: string[]): boolean {

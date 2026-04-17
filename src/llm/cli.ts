@@ -156,7 +156,10 @@ async function callCodex(command: string[], model: string, prompt: string): Prom
     const stderr = await new Response(proc.stderr).text();
     const exitCode = await proc.exited;
     if (exitCode !== 0) {
-      throw new Error(`codex exited ${exitCode}: ${stderr.slice(0, 500)}`);
+      // Codex banner alone is ~300 chars; the actual error (e.g.
+      // "You've hit your usage limit") comes after. 1500 chars
+      // ensures circuit breaker can match quota keywords.
+      throw new Error(`codex exited ${exitCode}: ${stderr.slice(0, 1500)}`);
     }
 
     return await readFile(outFile, "utf-8");

@@ -130,6 +130,19 @@ export function startServer() {
     }
   }, 5 * 60 * 1000);
 
+  // Reclassify worker — every 90 seconds, batch=3
+  // Picks entries stored with default metadata (0 tags) and re-runs
+  // batch classify to fill in domain/tags/decayRate. Covers the case
+  // where the original classify LLM call failed during research.
+  setInterval(async () => {
+    try {
+      const { processReclassifyQueue } = await import("../collect/reclassify-queue");
+      await processReclassifyQueue(3);
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "reclassify worker failed");
+    }
+  }, 90 * 1000);
+
   // Claim extraction worker — every 60 seconds, batch=3
   // Picks recently stored entries without claims and extracts them
   // serially. Separated from ingest so bursty research doesn't spawn

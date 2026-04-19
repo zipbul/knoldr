@@ -43,6 +43,11 @@ export async function expandWithKgFacts(claim: string): Promise<string> {
   if (entityNames.size === 0) return "";
 
   const names = Array.from(entityNames);
+  // Drizzle's tagged template expands array bindings positionally,
+  // so ANY(${names}) becomes ANY(($1, $2, ...)) — not a valid Postgres
+  // array literal. Build the array as a single bind via sql.array
+  // (text[]) so ANY() sees one parameter.
+  const namesArr = sql`ARRAY[${sql.join(names.map((n) => sql`${n}`), sql`, `)}]::text[]`;
   const rows = (await db.execute(sql`
     SELECT
       src.name AS subject,
@@ -53,7 +58,7 @@ export async function expandWithKgFacts(claim: string): Promise<string> {
     JOIN entity tgt ON tgt.id = r.target_entity_id
     JOIN claim c ON c.id = r.claim_id
     WHERE c.verdict = 'verified'
-      AND (lower(src.name) = ANY(${names}) OR lower(tgt.name) = ANY(${names}))
+      AND (lower(src.name) = ANY(${namesArr}) OR lower(tgt.name) = ANY(${namesArr}))
     ORDER BY r.weight DESC, r.created_at DESC
     LIMIT ${MAX_FACTS}
   `)) as unknown as KgFact[];

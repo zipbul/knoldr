@@ -30,7 +30,7 @@ export async function processRetryQueue(): Promise<number> {
           : undefined,
       });
 
-      await ingest(input);
+      await ingest(input, { fromRetry: true });
 
       // Success: remove from queue
       await db.delete(retryQueue).where(eq(retryQueue.id, item.id));

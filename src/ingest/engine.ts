@@ -27,8 +27,19 @@ export interface IngestResult {
 
 /**
  * Main ingestion engine. Accepts both raw (Mode 1) and structured (Mode 2) inputs.
+ *
+ * `fromRetry` should be true when the call originates from
+ * `processRetryQueue` so a second decompose failure doesn't enqueue
+ * a fresh retry entry — the retry loop already manages its own
+ * attempt counter and backoff. Without this guard, every failed
+ * retry creates a new queue entry, and the loop spins forever
+ * (the original entry gets removed for "succeeding" since ingest
+ * doesn't throw; the new entry takes its place; repeat).
  */
-export async function ingest(input: StoreInput): Promise<IngestResult[]> {
+export async function ingest(
+  input: StoreInput,
+  opts: { fromRetry?: boolean } = {},
+): Promise<IngestResult[]> {
   const timer = ingestionLatency.startTimer();
   const sources: Source[] = input.sources ?? [];
   const results: IngestResult[] = [];
@@ -43,7 +54,7 @@ export async function ingest(input: StoreInput): Promise<IngestResult[]> {
       decomposedEntries = response.entries;
     } catch (err) {
       const errorMsg = (err as Error).message;
-      logger.error({ error: errorMsg }, "decompose failed, enqueuing for retry");
+      logger.error({ error: errorMsg, fromRetry: !!opts.fromRetry }, "decompose failed");
 
       // Log as rejected
       await db.insert(ingestLog).values({
@@ -52,7 +63,12 @@ export async function ingest(input: StoreInput): Promise<IngestResult[]> {
         reason: `decompose_failed: ${errorMsg}`,
       });
 
-      // Enqueue for retry
+      // Re-throw when called from retry loop so the caller bumps
+      // attempts on the existing queue entry rather than spawning a
+      // new one. Fresh ingest paths still enqueue once for later retry.
+      if (opts.fromRetry) {
+        throw err;
+      }
       await enqueueRetry(
         input.raw,
         sources[0]?.url,

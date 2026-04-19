@@ -2,6 +2,7 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { generateEmbedding } from "../ingest/embed";
 import { rerank } from "../llm/reranker";
+import { sanitizeSource } from "./sanitize";
 import { logger } from "../observability/logger";
 
 // Per-fetch budget. Most pages render under 5s; the few that don't
@@ -25,6 +26,8 @@ export interface FetchedSource {
   lang?: string;
   fetchedAt: Date;
   error?: string;
+  /** True when prompt-injection patterns were stripped from text. */
+  injected?: boolean;
 }
 
 // LRU cache: same Wikipedia / arXiv / GitHub URLs get hit
@@ -115,15 +118,21 @@ async function doFetch(url: string): Promise<FetchedSource> {
       return { url, status: "no_content", fetchedAt, error: "readability returned empty" };
     }
 
+    const normalized = normalizeWhitespace(article.textContent);
+    const sanitized = sanitizeSource(normalized);
+    if (sanitized.injected) {
+      logger.warn({ url }, "prompt-injection patterns scrubbed from source");
+    }
     return {
       url,
       status: "ok",
       title: article.title ?? undefined,
-      text: normalizeWhitespace(article.textContent),
+      text: sanitized.cleaned,
       byline: article.byline ?? undefined,
       publishedTime: article.publishedTime ?? undefined,
       lang: article.lang ?? undefined,
       fetchedAt,
+      injected: sanitized.injected,
     };
   } catch (err) {
     const msg = (err as Error).message;

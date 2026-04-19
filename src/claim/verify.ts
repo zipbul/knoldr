@@ -310,10 +310,16 @@ async function runSourceCheck(
   const kgPrefix = await expandWithKgFacts(statement);
   for (const url of urls) {
     const fetched = await fetchSource(url);
+    // Halve authority when the source tried prompt injection — a
+    // page that attempted to manipulate the verifier is structurally
+    // less trustworthy on the underlying topic too. Doesn't reject
+    // outright (the surrounding factual content might still be
+    // useful) but the Bayesian aggregator will discount it heavily.
+    const baseAuthority = authorityFor(url);
     const check: SourceCheckResult = {
       url,
       status: fetched.status,
-      authority: authorityFor(url),
+      authority: fetched.injected ? baseAuthority * 0.5 : baseAuthority,
       publishedTime: fetched.publishedTime,
     };
     // Skip sources that predate the claim's referenced year. They

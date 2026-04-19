@@ -6,6 +6,7 @@ import { callAllLlms, extractJson, type LlmVote } from "../llm/cli";
 import { nliScore, type NliScores } from "../llm/nli";
 import { fetchSource, selectRelevantChunks, type FetchedSource } from "./source-fetch";
 import { checkKgContradiction, type KgContradiction } from "../kg/contradiction";
+import { expandWithKgFacts } from "../kg/expand";
 import { decomposeClaim } from "./cove";
 import { webSearch } from "./web-search";
 import { getSpecializedHits } from "./specialized-retrieval";
@@ -16,6 +17,8 @@ import { aggregate, type SourceEvidence } from "./aggregator";
 import { fingerprint } from "./independence";
 import { numericContradicts } from "./numeric";
 import { hasNegation, NEGATION_DAMPING } from "./negation";
+import { counterSearch } from "./counter-search";
+import { qaVerify } from "../llm/docqa";
 import { logger } from "../observability/logger";
 
 const VERDICTS = ["verified", "disputed", "unverified"] as const;
@@ -147,7 +150,28 @@ export async function verifyClaim(claimId: string): Promise<VerifyResult | null>
   // not the LLM's prior knowledge.
   if (sourceUrls.length > 0) {
     const sourceCheck = await runSourceCheck(row.statement, sourceUrls);
-    if (sourceCheck) return sourceCheck;
+    if (sourceCheck) {
+      // Counter-search guard: when a verified verdict comes back,
+      // try to refute it once before committing. Echo-chamber
+      // sources are real (especially for tech blog cargo-cult
+      // claims) and a single authoritative contradiction here
+      // saves a false positive in production.
+      if (sourceCheck.verdict === "verified") {
+        const counter = await counterSearch(row.statement);
+        if (counter?.triggered) {
+          return {
+            verdict: "disputed",
+            certainty: counter.contradiction,
+            evidence: {
+              ...sourceCheck.evidence,
+              source: "source_check",
+              rationale: `counter-search refuted at ${counter.url} (contradiction=${counter.contradiction.toFixed(2)})`,
+            },
+          };
+        }
+      }
+      return sourceCheck;
+    }
 
     // Source check inconclusive (every chunk neutral or below
     // threshold). Try CoVe: decompose the claim into atomic sub-
@@ -276,6 +300,13 @@ async function runSourceCheck(
   const evidences: Array<SourceEvidence & { fpKey: string }> = [];
 
   const claimYear = extractClaimYear(statement);
+  // Prefix every NLI premise with verified KG facts about the
+  // claim's entities. When the chunk text only partially mentions
+  // the subject this gives the model the rest of the known graph
+  // as direct context. Cost: one LLM triple-extraction call per
+  // verify (already done by checkKgContradiction upstream — could
+  // be memoized if it becomes a hot path).
+  const kgPrefix = await expandWithKgFacts(statement);
   for (const url of urls) {
     const fetched = await fetchSource(url);
     const check: SourceCheckResult = {
@@ -303,13 +334,14 @@ async function runSourceCheck(
       let bestText = "";
       let numericOverride = false;
       for (const c of chunks) {
-        const s = await nliScore(c, statement);
+        const premise = kgPrefix ? `${kgPrefix}${c}` : c;
+        const s = await nliScore(premise, statement);
         // Numeric override: when the claim asserts e.g. "770M" but
         // this chunk says "7B" for the same entity, the chunk is
         // refuting regardless of what NLI says about the surrounding
         // prose. Force max contradiction; preserve the chunk text
         // so the citation surface still shows the offending number.
-        const effective = numericContradicts(statement, c)
+        const effective = numericContradicts(statement, premise)
           ? { entailment: 0, neutral: 0, contradiction: 1 }
           : s;
         const net = Math.abs(effective.entailment - effective.contradiction);
@@ -317,7 +349,7 @@ async function runSourceCheck(
           bestNet = net;
           bestChunk = effective;
           bestText = c;
-          numericOverride = numericContradicts(statement, c);
+          numericOverride = numericContradicts(statement, premise);
         }
       }
       check.scores = bestChunk;
@@ -366,6 +398,32 @@ async function runSourceCheck(
   // search rather than commit on weak signal.
   let damped = agg.certainty;
   if (hasNegation(statement)) damped *= NEGATION_DAMPING;
+
+  // Borderline confidence (0.4-0.7) → escalate one more time with
+  // a DocQA verifier. NLI gives entailment over the whole chunk;
+  // QA isolates the *answer span* the source actually contains for
+  // the question the claim asserts. When QA disagrees with NLI we
+  // damp further (mixed signal); when QA agrees we boost a bit.
+  if (damped >= 0.4 && damped < 0.7 && evidences.length > 0) {
+    const topEvidence = evidences.reduce((a, b) =>
+      a.scores.entailment > b.scores.entailment ? a : b,
+    );
+    const topUrl = checks.find((c) => c.scores === topEvidence.scores)?.url;
+    const topText = topUrl
+      ? checks.find((c) => c.url === topUrl)?.citation ?? ""
+      : "";
+    if (topText) {
+      try {
+        const qa = await qaVerify(statement, topText);
+        if (qa) {
+          if (qa.supports) damped = Math.min(0.95, damped + 0.1);
+          else damped *= 0.7;
+        }
+      } catch (err) {
+        logger.debug({ error: (err as Error).message }, "QA verifier failed");
+      }
+    }
+  }
 
   const thresholds = await getCurrentThresholds();
   // Honor calibrated thresholds when they're stricter than the
@@ -555,22 +613,24 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
     .orderBy(desc(verifyQueue.priority), verifyQueue.nextAttemptAt)
     .limit(batchSize);
 
-  let processed = 0;
-  for (const item of due) {
-    try {
+  // Concurrent batch. Each claim's verify is dominated by network
+  // waits (URL fetches, LLM HTTP, SearXNG) — `Promise.allSettled`
+  // overlaps those so an N-claim batch finishes in roughly the time
+  // of the slowest single claim, not their sum. NLI/reranker model
+  // forward passes still serialize on the JS thread, but those are
+  // microseconds compared to the seconds-each network waits.
+  const results = await Promise.allSettled(
+    due.map(async (item) => {
       let result = await verifyClaim(item.claimId);
       if (!result) {
-        // Every layer (KG, source_check, CoVe, web_search, jury)
-        // returned null — usually because entry sources are unrelated
-        // and external lookups produced nothing decisive. Commit an
-        // explicit `unverified` so the claim leaves the queue and
-        // its evidence trail records *why* nothing committed.
-        // Without this we'd silently bump attempts forever and the
-        // claim would sit at its initial verdict with no evidence.
         if (item.attempts < 2) {
           await bumpAttempt(item.claimId);
-          continue;
+          return { committed: false };
         }
+        // Three exhaustive failures → commit explicit unverified so
+        // the claim leaves the queue and the evidence trail records
+        // why nothing landed. Without this the claim silently sits
+        // at its initial verdict forever.
         result = {
           verdict: "unverified",
           certainty: 0,
@@ -581,20 +641,28 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
         await tx
           .update(claim)
           .set({
-            verdict: result.verdict,
-            certainty: result.certainty,
-            evidence: result.evidence,
+            verdict: result!.verdict,
+            certainty: result!.certainty,
+            evidence: result!.evidence,
           })
           .where(eq(claim.id, item.claimId));
         await tx.delete(verifyQueue).where(eq(verifyQueue.claimId, item.claimId));
       });
+      return { committed: true };
+    }),
+  );
+
+  let processed = 0;
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i]!;
+    if (r.status === "fulfilled" && r.value.committed) {
       processed++;
-    } catch (err) {
+    } else if (r.status === "rejected") {
       logger.warn(
-        { claimId: item.claimId, error: (err as Error).message },
+        { claimId: due[i]!.claimId, error: (r.reason as Error).message },
         "verify failed, rescheduling",
       );
-      await bumpAttempt(item.claimId);
+      await bumpAttempt(due[i]!.claimId);
     }
   }
 

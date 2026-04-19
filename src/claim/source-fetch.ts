@@ -27,11 +27,61 @@ export interface FetchedSource {
   error?: string;
 }
 
+// LRU cache: same Wikipedia / arXiv / GitHub URLs get hit
+// repeatedly across claims (often dozens of times in a single verify
+// batch). Caching the parsed body avoids re-fetching + re-running
+// Readability for ~24h, which is well within how often these
+// sources change. Capped at 1000 entries; oldest evicted first.
+const CACHE_TTL_MS = 24 * 3600 * 1000;
+const CACHE_MAX_ENTRIES = 1000;
+const cache = new Map<string, { result: FetchedSource; expiresAt: number }>();
+const inflight = new Map<string, Promise<FetchedSource>>();
+
+function cacheGet(url: string): FetchedSource | null {
+  const hit = cache.get(url);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    cache.delete(url);
+    return null;
+  }
+  // LRU bump: re-insert to move to most-recent position.
+  cache.delete(url);
+  cache.set(url, hit);
+  return hit.result;
+}
+
+function cacheSet(url: string, result: FetchedSource): void {
+  cache.set(url, { result, expiresAt: Date.now() + CACHE_TTL_MS });
+  while (cache.size > CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
 /**
  * Fetch a URL and extract the main readable body via Readability.
- * Returns text suitable for NLI premise input; never throws.
+ * Returns text suitable for NLI premise input; never throws. Cached
+ * for 24h; concurrent calls for the same URL share one in-flight
+ * fetch (no thundering herd when a batch verifies many claims that
+ * all reference the same authoritative source).
  */
 export async function fetchSource(url: string): Promise<FetchedSource> {
+  const cached = cacheGet(url);
+  if (cached) return cached;
+  const inFlight = inflight.get(url);
+  if (inFlight) return inFlight;
+
+  const promise = doFetch(url).then((result) => {
+    cacheSet(url, result);
+    inflight.delete(url);
+    return result;
+  });
+  inflight.set(url, promise);
+  return promise;
+}
+
+async function doFetch(url: string): Promise<FetchedSource> {
   const fetchedAt = new Date();
   const ctrl = AbortSignal.timeout(FETCH_TIMEOUT_MS);
 

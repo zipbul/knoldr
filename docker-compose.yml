@@ -67,25 +67,27 @@ services:
     profiles:
       - test
 
-  # Fine-tune sidecar: LoRA-trains Gemma 4 E4B on accumulated
-  # pseudo-gold (source_check + KG agreement) and registers the
-  # result as `knoldr-judge:vYYYYMMDD-HHMM` in Ollama. Runs on
-  # demand (`docker compose run --rm finetune`) or on a host cron;
-  # not in the always-up service set because training holds the GPU
-  # for hours and would starve the live verify workers.
+  # Fine-tune sidecar: long-running container that wakes every
+  # KNOLDR_FT_INTERVAL_HOURS (default 168 = weekly), checks if
+  # enough new pseudo-gold has accumulated, and if so unloads
+  # Ollama models, LoRA-trains Gemma 4 E4B, exports a quantized
+  # GGUF, and registers it as knoldr-judge:vYYYYMMDD-HHMM. Default
+  # cadence is weekly so training never starves the live verify
+  # workers more than once a week and Ollama auto-reloads after.
   finetune:
     build:
       context: ./finetune
-    profiles:
-      - finetune
     environment:
       DATABASE_URL: postgres://knoldr:knoldr@db:5432/knoldr
       OLLAMA_HOST: "http://host.docker.internal:11434"
       KNOLDR_FT_GGUF_OUT: "/ollama-models/knoldr"
+      KNOLDR_FT_INTERVAL_HOURS: "${KNOLDR_FT_INTERVAL_HOURS:-168}"
+      KNOLDR_FT_MIN_SAMPLES: "${KNOLDR_FT_MIN_SAMPLES:-200}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - /home/revil/.ollama/models:/ollama-models
+    restart: unless-stopped
     deploy:
       resources:
         reservations:

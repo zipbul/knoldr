@@ -67,6 +67,33 @@ services:
     profiles:
       - test
 
+  # Fine-tune sidecar: LoRA-trains Gemma 4 E4B on accumulated
+  # pseudo-gold (source_check + KG agreement) and registers the
+  # result as `knoldr-judge:vYYYYMMDD-HHMM` in Ollama. Runs on
+  # demand (`docker compose run --rm finetune`) or on a host cron;
+  # not in the always-up service set because training holds the GPU
+  # for hours and would starve the live verify workers.
+  finetune:
+    build:
+      context: ./finetune
+    profiles:
+      - finetune
+    environment:
+      DATABASE_URL: postgres://knoldr:knoldr@db:5432/knoldr
+      OLLAMA_HOST: "http://host.docker.internal:11434"
+      KNOLDR_FT_GGUF_OUT: "/ollama-models/knoldr"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /home/revil/.ollama/models:/ollama-models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   # SearXNG meta-search: aggregates Google, Bing, DuckDuckGo, Wikipedia,
   # GitHub, arXiv etc. Self-hosted so we get unmetered queries and can
   # tune engine selection per claim type. JSON API enabled via baked-in

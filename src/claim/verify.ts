@@ -12,6 +12,10 @@ import { getSpecializedHits } from "./specialized-retrieval";
 import { authorityFor } from "./authority";
 import { extractClaimYear, isSourceTooOld } from "./time-aware";
 import { getCurrentThresholds } from "./calibration";
+import { aggregate, type SourceEvidence } from "./aggregator";
+import { fingerprint } from "./independence";
+import { numericContradicts } from "./numeric";
+import { hasNegation, NEGATION_DAMPING } from "./negation";
 import { logger } from "../observability/logger";
 
 const VERDICTS = ["verified", "disputed", "unverified"] as const;
@@ -23,6 +27,8 @@ interface SourceCheckResult {
   scores?: NliScores;
   authority?: number;
   publishedTime?: string;
+  /** Exact substring of fetched.text whose NLI drove this source's verdict. */
+  citation?: string;
 }
 
 interface SubClaimResult {
@@ -161,10 +167,14 @@ export async function verifyClaim(claimId: string): Promise<VerifyResult | null>
   // library every time.
   const specialized = await getSpecializedHits(row.statement);
   const web = await webSearch(row.statement);
+  // Wider candidate pool than entry-source path: external retrieval
+  // is noisier per-source (random web pages vs cited sources), so
+  // we accept more candidates to give the Bayesian aggregator
+  // enough independent groups to overcome individual misses.
   const externalUrls = [...specialized, ...web]
     .map((r) => r.url)
     .filter((u, i, arr) => arr.indexOf(u) === i)
-    .slice(0, SOURCE_CHECK_MAX_URLS);
+    .slice(0, 8);
   if (externalUrls.length > 0) {
     const webCheck = await runSourceCheck(row.statement, externalUrls);
     if (webCheck) return webCheck;
@@ -263,8 +273,7 @@ async function runSourceCheck(
   urls: string[],
 ): Promise<VerifyResult | null> {
   const checks: SourceCheckResult[] = [];
-  let bestSupport: { score: number; check: SourceCheckResult } | null = null;
-  let bestRefute: { score: number; check: SourceCheckResult } | null = null;
+  const evidences: Array<SourceEvidence & { fpKey: string }> = [];
 
   const claimYear = extractClaimYear(statement);
   for (const url of urls) {
@@ -285,66 +294,116 @@ async function runSourceCheck(
     }
     if (fetched.status === "ok" && fetched.text) {
       const chunks = await selectRelevantChunks(fetched.text, statement);
-      // Run NLI on each chunk separately; combining chunks dilutes
-      // the entailment signal (noise from unrelated chunks masks the
-      // one chunk that actually proves/disproves the claim).
-      //
-      // Aggregation: take the chunk with the strongest *net* signal
-      // (entailment - contradiction). max(entail) + max(contradict)
-      // independently is wrong because different chunks routinely
-      // pull in opposite directions on the same article — picking
-      // the most-decisive chunk avoids false "both high" outcomes.
+      // Per-source: take the chunk with the strongest *net* signal.
+      // Cross-source aggregation is handled below by the Bayesian
+      // aggregator, which combines per-source NLI distributions
+      // weighted by authority and damped by independence groups.
       let bestChunk: NliScores = { entailment: 0, neutral: 1, contradiction: 0 };
       let bestNet = -Infinity;
+      let bestText = "";
+      let numericOverride = false;
       for (const c of chunks) {
         const s = await nliScore(c, statement);
-        const net = Math.abs(s.entailment - s.contradiction);
+        // Numeric override: when the claim asserts e.g. "770M" but
+        // this chunk says "7B" for the same entity, the chunk is
+        // refuting regardless of what NLI says about the surrounding
+        // prose. Force max contradiction; preserve the chunk text
+        // so the citation surface still shows the offending number.
+        const effective = numericContradicts(statement, c)
+          ? { entailment: 0, neutral: 0, contradiction: 1 }
+          : s;
+        const net = Math.abs(effective.entailment - effective.contradiction);
         if (net > bestNet) {
           bestNet = net;
-          bestChunk = s;
+          bestChunk = effective;
+          bestText = c;
+          numericOverride = numericContradicts(statement, c);
         }
       }
       check.scores = bestChunk;
-      // Weight the NLI probability by source authority. A 0.99
-      // entailment from a random blog (authority 0.4) becomes 0.40,
-      // safely below the 0.7 threshold; the same from arXiv (0.9)
-      // becomes 0.89, above threshold. This prevents a confident-
-      // looking but low-credibility source from carrying the verdict.
-      const authority = check.authority ?? 0.5;
-      const weightedSupport = bestChunk.entailment * authority;
-      const weightedRefute = bestChunk.contradiction * authority;
-      if (weightedSupport > weightedRefute) {
-        if (!bestSupport || weightedSupport > bestSupport.score) {
-          bestSupport = { score: weightedSupport, check };
-        }
-      } else {
-        if (!bestRefute || weightedRefute > bestRefute.score) {
-          bestRefute = { score: weightedRefute, check };
-        }
-      }
+      if (numericOverride) check.status = check.status; // (status unchanged; record kept implicit via scores)
+      // Store the winning chunk as citation. Trimmed to one
+      // sentence when possible — that's the actual supporting /
+      // refuting line worth showing to a reader.
+      check.citation = pickCitationSentence(bestText, statement) ?? bestText.slice(0, 400);
+      const fp = fingerprint(url, fetched.title ?? "", fetched.text);
+      evidences.push({
+        scores: bestChunk,
+        authority: check.authority ?? 0.5,
+        group: -1, // assigned after independence clustering below
+        fpKey: `${fp.domain}|${fp.titleNorm}|${fp.simhash.toString()}`,
+      });
     }
     checks.push(check);
   }
 
-  // Refutation wins ties — knoldr cares about catching false claims
-  // more than missing true ones. A single strong contradiction is
-  // sufficient for `disputed`; same threshold for support.
+  if (evidences.length === 0) return null;
+
+  // Cluster evidences into independence groups (domain / title /
+  // simhash). independentCount expects SourceFingerprint shape; we
+  // only need the grouping side-effect, so re-derive locally.
+  const groups: string[][] = [];
+  for (const e of evidences) {
+    let placed = false;
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i]!.includes(e.fpKey)) {
+        e.group = i;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      e.group = groups.length;
+      groups.push([e.fpKey]);
+    }
+  }
+
+  const agg = aggregate(evidences);
+
+  // Negation damping. NLI flips unreliably on negated claims, so we
+  // damp the aggregated certainty before threshold checks; a
+  // borderline negated claim should fall through to CoVe / web
+  // search rather than commit on weak signal.
+  let damped = agg.certainty;
+  if (hasNegation(statement)) damped *= NEGATION_DAMPING;
+
   const thresholds = await getCurrentThresholds();
-  if (bestRefute && bestRefute.score >= thresholds.refute) {
-    return {
-      verdict: "disputed",
-      certainty: bestRefute.score,
-      evidence: { source: "source_check", sourceChecks: checks, sourceUrls: urls },
-    };
+  // Honor calibrated thresholds when they're stricter than the
+  // posterior cutoffs baked into the aggregator. Calibration drives
+  // the verdict floor; aggregator decides direction + magnitude.
+  if (agg.verdict === "verified" && damped < thresholds.support) return null;
+  if (agg.verdict === "disputed" && damped < thresholds.refute) return null;
+  if (agg.verdict === "unverified") return null;
+
+  return {
+    verdict: agg.verdict,
+    certainty: damped,
+    evidence: { source: "source_check", sourceChecks: checks, sourceUrls: urls },
+  };
+}
+
+/**
+ * From a chunk, pick the single sentence with the highest
+ * claim-keyword overlap. Returns null when nothing meaningful
+ * matches (caller falls back to the chunk prefix). Cheap heuristic
+ * — adequate for surfacing a quotable line, not a substitute for
+ * NLI on the whole chunk.
+ */
+function pickCitationSentence(chunk: string, claim: string): string | null {
+  const claimTerms = new Set(
+    (claim.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).slice(0, 30),
+  );
+  if (claimTerms.size === 0) return null;
+  const sentences = chunk.split(/(?<=[.!?。!?])\s+/);
+  let best: { s: string; score: number } | null = null;
+  for (const s of sentences) {
+    const terms = s.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [];
+    let hits = 0;
+    for (const t of terms) if (claimTerms.has(t)) hits++;
+    const score = hits / Math.max(terms.length, 1);
+    if (!best || score > best.score) best = { s, score };
   }
-  if (bestSupport && bestSupport.score >= thresholds.support) {
-    return {
-      verdict: "verified",
-      certainty: bestSupport.score,
-      evidence: { source: "source_check", sourceChecks: checks, sourceUrls: urls },
-    };
-  }
-  return null;
+  return best && best.score > 0 ? best.s.trim() : null;
 }
 
 async function dbCrossRef(
@@ -499,10 +558,24 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
   let processed = 0;
   for (const item of due) {
     try {
-      const result = await verifyClaim(item.claimId);
+      let result = await verifyClaim(item.claimId);
       if (!result) {
-        await bumpAttempt(item.claimId);
-        continue;
+        // Every layer (KG, source_check, CoVe, web_search, jury)
+        // returned null — usually because entry sources are unrelated
+        // and external lookups produced nothing decisive. Commit an
+        // explicit `unverified` so the claim leaves the queue and
+        // its evidence trail records *why* nothing committed.
+        // Without this we'd silently bump attempts forever and the
+        // claim would sit at its initial verdict with no evidence.
+        if (item.attempts < 2) {
+          await bumpAttempt(item.claimId);
+          continue;
+        }
+        result = {
+          verdict: "unverified",
+          certainty: 0,
+          evidence: { source: "llm_jury", rationale: "all paths exhausted" },
+        };
       }
       await db.transaction(async (tx) => {
         await tx

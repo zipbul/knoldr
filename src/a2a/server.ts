@@ -168,14 +168,18 @@ export function startServer() {
     }
   }, 120 * 1000);
 
-  // Claim verify queue processor — every 90 seconds, batch=5
-  // Pulls a small batch of factual claims, adjudicates via db_cross_ref +
-  // LLM judgment (see src/claim/verify.ts), updates verdict/certainty,
-  // and bumps entry.factuality.
+  // Claim verify queue processor — every 60 seconds, batch=15.
+  // Bumped from (90s, 5) after observing the queue accumulating
+  // faster than it drained: each verify now spans 1-3 minutes with
+  // the full multi-stage pipeline, but Promise.allSettled overlaps
+  // the network-bound waits across the batch so 15 in parallel
+  // finishes in roughly the time of the slowest one. NLI/reranker
+  // forward passes still serialize on the JS thread but they're
+  // microseconds compared to the URL-fetch / LLM HTTP waits.
   setInterval(async () => {
     try {
       const { processVerifyQueue, updateFactualityScore } = await import("../claim/verify");
-      const processed = await processVerifyQueue(5);
+      const processed = await processVerifyQueue(15);
       if (processed > 0) {
         // Recompute factuality for entries touched by this batch.
         const { db } = await import("../db/connection");
@@ -195,7 +199,7 @@ export function startServer() {
     } catch (err) {
       logger.error({ error: (err as Error).message }, "verify queue processing failed");
     }
-  }, 90 * 1000);
+  }, 60 * 1000);
 
   // Calibration worker — every 30 minutes. Sweeps NLI thresholds
   // against pseudo-gold (signal-agreement) labels and writes the

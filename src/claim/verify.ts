@@ -19,6 +19,7 @@ import { numericContradicts } from "./numeric";
 import { hasNegation, NEGATION_DAMPING } from "./negation";
 import { counterSearch } from "./counter-search";
 import { qaVerify } from "../llm/docqa";
+import { bespokeCheck } from "../llm/bespoke-check";
 import { logger } from "../observability/logger";
 
 const VERDICTS = ["verified", "disputed", "unverified"] as const;
@@ -399,11 +400,16 @@ async function runSourceCheck(
   let damped = agg.certainty;
   if (hasNegation(statement)) damped *= NEGATION_DAMPING;
 
-  // Borderline confidence (0.4-0.7) → escalate one more time with
-  // a DocQA verifier. NLI gives entailment over the whole chunk;
-  // QA isolates the *answer span* the source actually contains for
-  // the question the claim asserts. When QA disagrees with NLI we
-  // damp further (mixed signal); when QA agrees we boost a bit.
+  // Borderline confidence (0.4-0.7) → escalate with two extra
+  // verifiers and use majority signal:
+  //   1. DocQA: extract answer span from source, compare to claim's
+  //      asserted object.
+  //   2. Bespoke-MiniCheck-7B: current SOTA on LLM-AggreFact (77.4%
+  //      balanced accuracy, beats GPT-4 / Claude-3.5 Sonnet on
+  //      grounded fact-checking). Different architecture from NLI
+  //      models so it's an independent vote, not just confirmation.
+  // When both extra signals agree with NLI we boost certainty;
+  // when they split, we damp.
   if (damped >= 0.4 && damped < 0.7 && evidences.length > 0) {
     const topEvidence = evidences.reduce((a, b) =>
       a.scores.entailment > b.scores.entailment ? a : b,
@@ -414,13 +420,30 @@ async function runSourceCheck(
       : "";
     if (topText) {
       try {
-        const qa = await qaVerify(statement, topText);
+        const [qa, bespoke] = await Promise.all([
+          qaVerify(statement, topText).catch(() => null),
+          bespokeCheck(topText, statement).catch(() => null),
+        ]);
+        let agree = 0;
+        let votes = 0;
+        const nliSupports = topEvidence.scores.entailment > topEvidence.scores.contradiction;
         if (qa) {
-          if (qa.supports) damped = Math.min(0.95, damped + 0.1);
-          else damped *= 0.7;
+          votes++;
+          if (qa.supports === nliSupports) agree++;
+        }
+        if (bespoke) {
+          votes++;
+          if (bespoke.supported === nliSupports) agree++;
+        }
+        if (votes > 0) {
+          const agreementRate = agree / votes;
+          // 100% agree → +0.15 boost; 0% (unanimous against) → ×0.5
+          if (agreementRate === 1) damped = Math.min(0.95, damped + 0.15);
+          else if (agreementRate === 0) damped *= 0.5;
+          else damped *= 0.85;
         }
       } catch (err) {
-        logger.debug({ error: (err as Error).message }, "QA verifier failed");
+        logger.debug({ error: (err as Error).message }, "QA/Bespoke escalation failed");
       }
     }
   }

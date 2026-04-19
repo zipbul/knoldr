@@ -5,9 +5,10 @@ import { tmpdir } from "os";
 
 interface CliConfig {
   name: string;
-  command: string[];
   model: string;
-  mode: "codex" | "generic"; // codex uses -o file + stdin, generic uses -p + stdout
+  mode: "codex" | "generic" | "ollama";
+  // codex/generic spawn a subprocess; ollama hits the HTTP API.
+  command?: string[];
 }
 
 // Verified against OpenAI Codex docs + gemini CLI probe:
@@ -25,11 +26,41 @@ interface CliConfig {
 const CODEX_MODEL = "gpt-5.4-mini";
 const GEMINI_MODEL = "gemini-2.5-flash-lite";
 
-function getCliConfigs(): CliConfig[] {
+// Local Ollama is the primary path now — cloud CLIs are jury-only
+// fallback to keep daily quotas. Defaults match the host's pulled tags.
+const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
+const OLLAMA_FAST_MODEL = process.env.KNOLDR_OLLAMA_FAST_MODEL ?? "gemma4:e4b";
+const OLLAMA_JURY_MODELS = (
+  process.env.KNOLDR_OLLAMA_JURY_MODELS ?? "gemma4:e4b,qwen2.5:14b"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function ollamaConfig(model: string): CliConfig {
+  return { name: `ollama:${model}`, model, mode: "ollama" };
+}
+
+function getFastConfigs(): CliConfig[] {
+  // Single-call path (decompose / classify / extract). Local first,
+  // cloud only if Ollama is unreachable.
   const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
   const geminiCli = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
-
   return [
+    ollamaConfig(OLLAMA_FAST_MODEL),
+    { name: "codex", command: codexCli.split(/\s+/), model: CODEX_MODEL, mode: "codex" },
+    { name: "gemini", command: geminiCli.split(/\s+/), model: GEMINI_MODEL, mode: "generic" },
+  ];
+}
+
+function getJuryConfigs(): CliConfig[] {
+  // Jury path needs *different* models for diverse votes. Local jury
+  // models first; cloud CLIs added as a 3rd voter only when healthy.
+  const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
+  const geminiCli = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
+  const local = OLLAMA_JURY_MODELS.map(ollamaConfig);
+  return [
+    ...local,
     { name: "codex", command: codexCli.split(/\s+/), model: CODEX_MODEL, mode: "codex" },
     { name: "gemini", command: geminiCli.split(/\s+/), model: GEMINI_MODEL, mode: "generic" },
   ];
@@ -77,7 +108,7 @@ function markCliUnhealthy(name: string, err: Error): void {
  * Returns the raw stdout/output text.
  */
 export async function callLlm(prompt: string): Promise<string> {
-  const configs = getCliConfigs();
+  const configs = getFastConfigs();
   let lastError: Error | null = null;
 
   for (const cli of configs) {
@@ -106,7 +137,7 @@ export interface LlmVote {
  * cross-provider "jury" without a full Pyreez deliberation engine.
  */
 export async function callAllLlms(prompt: string): Promise<LlmVote[]> {
-  const configs = getCliConfigs().filter((c) => isCliHealthy(c.name));
+  const configs = getJuryConfigs().filter((c) => isCliHealthy(c.name));
   if (configs.length === 0) return [];
 
   const settled = await Promise.allSettled(
@@ -134,10 +165,41 @@ export async function callAllLlms(prompt: string): Promise<LlmVote[]> {
 }
 
 async function callSingleCli(cli: CliConfig, prompt: string): Promise<string> {
+  if (cli.mode === "ollama") {
+    return callOllama(cli.model, prompt);
+  }
+  if (!cli.command) {
+    throw new Error(`CLI ${cli.name} missing command`);
+  }
   if (cli.mode === "codex") {
     return callCodex(cli.command, cli.model, prompt);
   }
   return callGeneric(cli.command, cli.model, prompt);
+}
+
+async function callOllama(model: string, prompt: string): Promise<string> {
+  // /api/generate with stream:false returns a single JSON envelope.
+  // format:"json" tells Ollama to constrain decoding to valid JSON,
+  // which materially improves schema adherence on local models.
+  const res = await fetch(`${OLLAMA_HOST}/api/generate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model,
+      prompt,
+      stream: false,
+      format: "json",
+      options: { temperature: 0.1, num_ctx: 8192 },
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`ollama ${model} HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
+  const json = (await res.json()) as { response?: string; error?: string };
+  if (json.error) throw new Error(`ollama ${model} error: ${json.error}`);
+  if (!json.response) throw new Error(`ollama ${model} empty response`);
+  return json.response;
 }
 
 async function callCodex(command: string[], model: string, prompt: string): Promise<string> {

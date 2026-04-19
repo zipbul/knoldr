@@ -242,6 +242,28 @@ async function migrate() {
   await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_source ON kg_relation(source_entity_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_target ON kg_relation(target_entity_id)`;
 
+  // No human-review queue. The verifier auto-escalates uncertain
+  // cases through CoVe + web_search + specialized retrieval and
+  // commits whatever the strongest available signal indicates,
+  // preferring low-certainty over a deferred decision.
+
+  // ============================================================
+  // calibration_state (v0.5) — auto-calibrated thresholds. A
+  // single-row table updated by the calibration worker; verify
+  // pipeline reads on each batch.
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS calibration_state (
+      id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      nli_support_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.7,
+      nli_refute_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.7,
+      sample_size INTEGER NOT NULL DEFAULT 0,
+      best_f1 DOUBLE PRECISION NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`INSERT INTO calibration_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING`;
+
   logger.info("migrations complete");
   await sql.end();
 }

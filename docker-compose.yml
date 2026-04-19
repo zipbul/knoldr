@@ -81,7 +81,7 @@ services:
       DATABASE_URL: postgres://knoldr:knoldr@db:5432/knoldr
       OLLAMA_HOST: "http://host.docker.internal:11434"
       KNOLDR_FT_GGUF_OUT: "/ollama-models/knoldr"
-      KNOLDR_FT_INTERVAL_HOURS: "${KNOLDR_FT_INTERVAL_HOURS:-168}"
+      KNOLDR_FT_INTERVAL_HOURS: "${KNOLDR_FT_INTERVAL_HOURS:-24}"
       KNOLDR_FT_MIN_SAMPLES: "${KNOLDR_FT_MIN_SAMPLES:-200}"
     extra_hosts:
       - "host.docker.internal:host-gateway"

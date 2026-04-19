@@ -367,3 +367,17 @@ export const entryScore = pgTable(
     index("idx_entry_score_dimension").on(t.dimension, t.value),
   ],
 );
+
+// ============================================================
+// calibration_state — Auto-tuned NLI thresholds (v0.5)
+// Single-row table. Verify pipeline reads on each batch start.
+// ============================================================
+export const calibrationState = pgTable("calibration_state", {
+  id: integer("id").primaryKey().default(1),
+  nliSupportThreshold: doublePrecision("nli_support_threshold").notNull().default(0.7),
+  nliRefuteThreshold: doublePrecision("nli_refute_threshold").notNull().default(0.7),
+  sampleSize: integer("sample_size").notNull().default(0),
+  bestF1: doublePrecision("best_f1").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+

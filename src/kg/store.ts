@@ -4,6 +4,7 @@ import { db } from "../db/connection";
 import { entity, kgRelation } from "../db/schema";
 import { generateEmbedding } from "../ingest/embed";
 import { logger } from "../observability/logger";
+import { normalizePredicate } from "./predicate";
 import type { ExtractedTriple } from "./extract";
 
 /**
@@ -85,7 +86,7 @@ export async function storeTriples(
           id: ulid(),
           sourceEntityId: sourceId,
           targetEntityId: targetId,
-          relationType: t.predicate.trim().toLowerCase(),
+          relationType: normalizePredicate(t.predicate),
           claimId,
           weight,
         })

@@ -1,0 +1,44 @@
+# Minimal SearXNG settings for knoldr — JSON API enabled, public web
+# engines + arXiv/GitHub/Wikipedia for fact-checking.
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "knoldr-searxng"
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+  default_lang: ""
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "knoldr-local-dev-secret-do-not-use-in-public-deployment"
+  base_url: "http://searxng:8080/"
+  limiter: false
+  image_proxy: false
+
+ui:
+  query_in_title: false
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 10.0
+  pool_connections: 100
+  pool_maxsize: 20
+
+engines:
+  - name: wikipedia
+    disabled: false
+  - name: github
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false

@@ -3,20 +3,48 @@ import { eq, sql, desc, and, lte, lt } from "drizzle-orm";
 import { db } from "../db/connection";
 import { claim, verifyQueue, entry, entryScore, entrySource } from "../db/schema";
 import { callAllLlms, extractJson, type LlmVote } from "../llm/cli";
+import { nliScore, type NliScores } from "../llm/nli";
+import { fetchSource, selectRelevantChunks, type FetchedSource } from "./source-fetch";
+import { checkKgContradiction, type KgContradiction } from "../kg/contradiction";
+import { decomposeClaim } from "./cove";
+import { webSearch } from "./web-search";
+import { getSpecializedHits } from "./specialized-retrieval";
+import { authorityFor } from "./authority";
+import { extractClaimYear, isSourceTooOld } from "./time-aware";
+import { getCurrentThresholds } from "./calibration";
 import { logger } from "../observability/logger";
 
 const VERDICTS = ["verified", "disputed", "unverified"] as const;
 type Verdict = (typeof VERDICTS)[number];
 
+interface SourceCheckResult {
+  url: string;
+  status: FetchedSource["status"];
+  scores?: NliScores;
+  authority?: number;
+  publishedTime?: string;
+}
+
+interface SubClaimResult {
+  statement: string;
+  verdict: Verdict;
+  certainty: number;
+  via: "kg_contradiction" | "source_check" | "unverified";
+  scores?: NliScores;
+}
+
 export interface VerifyResult {
   verdict: Verdict;
   certainty: number;
   evidence: {
-    source: "db_cross_ref" | "llm_jury";
+    source: "db_cross_ref" | "kg_contradiction" | "source_check" | "cove" | "llm_jury";
     corroborations?: number;
     contradictions?: number;
     rationale?: string;
     sourceUrls?: string[];
+    sourceChecks?: SourceCheckResult[];
+    kgConflict?: KgContradiction;
+    subClaims?: SubClaimResult[];
     votes?: Array<{ cli: string; verdict: Verdict; certainty: number }>;
   };
 }
@@ -29,6 +57,13 @@ const judgmentSchema = z.object({
 
 const SIMILARITY_THRESHOLD = 0.8;
 const CROSS_REF_MIN_CORROBORATIONS = 3;
+
+// NLI thresholds. Default 0.7 (conventional FEVER cutoff) but the
+// auto-calibration worker overrides these in `calibration_state`
+// based on observed agreement between source_check + KG + jury.
+// `getCurrentThresholds()` is cached per minute so the cost is one
+// DB read per verify batch.
+const SOURCE_CHECK_MAX_URLS = 5;
 
 /**
  * Verify a single factual claim.
@@ -73,6 +108,21 @@ export async function verifyClaim(claimId: string): Promise<VerifyResult | null>
     };
   }
 
+  // KG contradiction check: extract triples from the claim, see if a
+  // verified claim ever asserted (subject, predicate, *different
+  // object*) for a functional relation. Catches lexical traps the
+  // NLI model misses (e.g. "Bun runs on V8" against KG saying
+  // "Bun runs_on JSCore"). Free signal — costs one LLM extraction
+  // call but skips both source fetch and jury when it fires.
+  const kgConflict = await checkKgContradiction(row.statement);
+  if (kgConflict && kgConflict.confidence >= 0.7) {
+    return {
+      verdict: "disputed",
+      certainty: kgConflict.confidence,
+      evidence: { source: "kg_contradiction", kgConflict },
+    };
+  }
+
   const sources = await db
     .select({ url: entrySource.url })
     .from(entrySource)
@@ -83,9 +133,218 @@ export async function verifyClaim(claimId: string): Promise<VerifyResult | null>
       ),
     );
 
-  const jury = await llmJury(row.statement, sources.map((s) => s.url));
+  const sourceUrls = sources.map((s) => s.url).slice(0, SOURCE_CHECK_MAX_URLS);
+
+  // Source-grounded NLI: fetch each entry source, run DeBERTa-FEVER on
+  // the most relevant window. This is the strongest signal available —
+  // calibrated entailment probability against the actual cited source,
+  // not the LLM's prior knowledge.
+  if (sourceUrls.length > 0) {
+    const sourceCheck = await runSourceCheck(row.statement, sourceUrls);
+    if (sourceCheck) return sourceCheck;
+
+    // Source check inconclusive (every chunk neutral or below
+    // threshold). Try CoVe: decompose the claim into atomic sub-
+    // claims and verify each separately. Lexical traps that fool the
+    // monolithic NLI pass usually break apart into one component
+    // that clearly fails — e.g. "Bun runs on V8" splits into "Bun
+    // is a JS runtime" (entailed) and "Bun's engine is V8" (refuted).
+    const cove = await runCoveVerification(row.statement, sourceUrls);
+    if (cove) return cove;
+  }
+
+  // No usable cited sources (or all inconclusive). Pull external
+  // evidence: specialized retrieval (GitHub for code claims, arXiv
+  // for research claims) plus SearXNG meta-search. Specialized hits
+  // come first because they're directly authoritative on their
+  // domain — a GitHub README beats a Medium summary of the same
+  // library every time.
+  const specialized = await getSpecializedHits(row.statement);
+  const web = await webSearch(row.statement);
+  const externalUrls = [...specialized, ...web]
+    .map((r) => r.url)
+    .filter((u, i, arr) => arr.indexOf(u) === i)
+    .slice(0, SOURCE_CHECK_MAX_URLS);
+  if (externalUrls.length > 0) {
+    const webCheck = await runSourceCheck(row.statement, externalUrls);
+    if (webCheck) return webCheck;
+    const webCove = await runCoveVerification(row.statement, externalUrls);
+    if (webCove) return webCove;
+  }
+
+  // Last resort: LLM jury using only URL list (no fetch). Model
+  // prior knowledge — least reliable path, kept so unverified is
+  // never the silent default.
+  const jury = await llmJury(row.statement, sourceUrls);
   if (!jury) return null;
   return jury;
+}
+
+/**
+ * CoVe wrapper: decompose the claim, verify each sub-claim through
+ * KG + source_check, aggregate. Aggregation rule: any disputed sub-
+ * claim → parent disputed (single false component breaks the
+ * conjunction). All verified → parent verified. Otherwise → null
+ * so the caller can fall back to the LLM jury.
+ */
+async function runCoveVerification(
+  statement: string,
+  sourceUrls: string[],
+): Promise<VerifyResult | null> {
+  const subclaims = await decomposeClaim(statement);
+  if (subclaims.length === 0) return null;
+
+  const subResults: SubClaimResult[] = [];
+  for (const sc of subclaims) {
+    const kg = await checkKgContradiction(sc);
+    if (kg && kg.confidence >= 0.7) {
+      subResults.push({
+        statement: sc,
+        verdict: "disputed",
+        certainty: kg.confidence,
+        via: "kg_contradiction",
+      });
+      continue;
+    }
+    const sc_check = await runSourceCheck(sc, sourceUrls);
+    if (sc_check) {
+      subResults.push({
+        statement: sc,
+        verdict: sc_check.verdict,
+        certainty: sc_check.certainty,
+        via: "source_check",
+        scores: sc_check.evidence.sourceChecks?.[0]?.scores,
+      });
+    } else {
+      subResults.push({
+        statement: sc,
+        verdict: "unverified",
+        certainty: 0,
+        via: "unverified",
+      });
+    }
+  }
+
+  const disputed = subResults.filter((s) => s.verdict === "disputed");
+  const verified = subResults.filter((s) => s.verdict === "verified");
+
+  // Single disputed sub-claim is sufficient — the original claim's
+  // truth requires every component to hold.
+  if (disputed.length > 0) {
+    const maxCert = Math.max(...disputed.map((d) => d.certainty));
+    return {
+      verdict: "disputed",
+      certainty: maxCert,
+      evidence: { source: "cove", subClaims: subResults, sourceUrls },
+    };
+  }
+  // All sub-claims verified: take the lowest certainty as the parent
+  // certainty (chain is only as strong as its weakest link).
+  if (verified.length === subResults.length) {
+    const minCert = Math.min(...verified.map((v) => v.certainty));
+    return {
+      verdict: "verified",
+      certainty: minCert,
+      evidence: { source: "cove", subClaims: subResults, sourceUrls },
+    };
+  }
+  // Mixed verified + unverified: not enough evidence to commit.
+  return null;
+}
+
+/**
+ * Fetch each source URL, run NLI against the claim, return a verdict
+ * if any source clearly supports or refutes. Returns null when every
+ * source is neutral / unfetchable so the caller can fall back to LLM
+ * jury.
+ */
+async function runSourceCheck(
+  statement: string,
+  urls: string[],
+): Promise<VerifyResult | null> {
+  const checks: SourceCheckResult[] = [];
+  let bestSupport: { score: number; check: SourceCheckResult } | null = null;
+  let bestRefute: { score: number; check: SourceCheckResult } | null = null;
+
+  const claimYear = extractClaimYear(statement);
+  for (const url of urls) {
+    const fetched = await fetchSource(url);
+    const check: SourceCheckResult = {
+      url,
+      status: fetched.status,
+      authority: authorityFor(url),
+      publishedTime: fetched.publishedTime,
+    };
+    // Skip sources that predate the claim's referenced year. They
+    // can't substantiate a future event but can cause false
+    // contradictions when an old article describes a now-superseded
+    // state of the world.
+    if (isSourceTooOld(fetched.publishedTime, claimYear)) {
+      checks.push({ ...check, status: "blocked_type" });
+      continue;
+    }
+    if (fetched.status === "ok" && fetched.text) {
+      const chunks = await selectRelevantChunks(fetched.text, statement);
+      // Run NLI on each chunk separately; combining chunks dilutes
+      // the entailment signal (noise from unrelated chunks masks the
+      // one chunk that actually proves/disproves the claim).
+      //
+      // Aggregation: take the chunk with the strongest *net* signal
+      // (entailment - contradiction). max(entail) + max(contradict)
+      // independently is wrong because different chunks routinely
+      // pull in opposite directions on the same article — picking
+      // the most-decisive chunk avoids false "both high" outcomes.
+      let bestChunk: NliScores = { entailment: 0, neutral: 1, contradiction: 0 };
+      let bestNet = -Infinity;
+      for (const c of chunks) {
+        const s = await nliScore(c, statement);
+        const net = Math.abs(s.entailment - s.contradiction);
+        if (net > bestNet) {
+          bestNet = net;
+          bestChunk = s;
+        }
+      }
+      check.scores = bestChunk;
+      // Weight the NLI probability by source authority. A 0.99
+      // entailment from a random blog (authority 0.4) becomes 0.40,
+      // safely below the 0.7 threshold; the same from arXiv (0.9)
+      // becomes 0.89, above threshold. This prevents a confident-
+      // looking but low-credibility source from carrying the verdict.
+      const authority = check.authority ?? 0.5;
+      const weightedSupport = bestChunk.entailment * authority;
+      const weightedRefute = bestChunk.contradiction * authority;
+      if (weightedSupport > weightedRefute) {
+        if (!bestSupport || weightedSupport > bestSupport.score) {
+          bestSupport = { score: weightedSupport, check };
+        }
+      } else {
+        if (!bestRefute || weightedRefute > bestRefute.score) {
+          bestRefute = { score: weightedRefute, check };
+        }
+      }
+    }
+    checks.push(check);
+  }
+
+  // Refutation wins ties — knoldr cares about catching false claims
+  // more than missing true ones. A single strong contradiction is
+  // sufficient for `disputed`; same threshold for support.
+  const thresholds = await getCurrentThresholds();
+  if (bestRefute && bestRefute.score >= thresholds.refute) {
+    return {
+      verdict: "disputed",
+      certainty: bestRefute.score,
+      evidence: { source: "source_check", sourceChecks: checks, sourceUrls: urls },
+    };
+  }
+  if (bestSupport && bestSupport.score >= thresholds.support) {
+    return {
+      verdict: "verified",
+      certainty: bestSupport.score,
+      evidence: { source: "source_check", sourceChecks: checks, sourceUrls: urls },
+    };
+  }
+  return null;
 }
 
 async function dbCrossRef(

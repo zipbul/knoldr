@@ -197,6 +197,32 @@ export function startServer() {
     }
   }, 90 * 1000);
 
+  // Calibration worker — every 30 minutes. Sweeps NLI thresholds
+  // against pseudo-gold (signal-agreement) labels and writes the
+  // best (support, refute) cutoffs to calibration_state. Verify
+  // workers pick up the new values within ~60s via cache TTL.
+  setInterval(async () => {
+    try {
+      const { calibrate } = await import("../claim/calibration");
+      await calibrate();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "calibration failed");
+    }
+  }, 30 * 60 * 1000);
+
+  // Drift detector — every 6 hours, batch=5. Re-verifies the oldest
+  // verified/disputed claims; demotes verdicts that no longer hold
+  // under current sources or current model. Runs at low rate so it
+  // doesn't crowd out the live verify queue.
+  setInterval(async () => {
+    try {
+      const { detectDrift } = await import("../claim/reverify");
+      await detectDrift(5);
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "drift detection failed");
+    }
+  }, 6 * 60 * 60 * 1000);
+
   logger.info({ port, host }, "knoldr A2A server started");
   return server;
 }

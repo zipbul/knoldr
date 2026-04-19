@@ -28,6 +28,17 @@ services:
       KNOLDR_LOG_LEVEL: "${KNOLDR_LOG_LEVEL:-info}"
       KNOLDR_API_TOKEN: "${KNOLDR_API_TOKEN:-}"
       LANGSEARCH_API_KEY: "${LANGSEARCH_API_KEY:-}"
+      # Local Ollama on the host. host.docker.internal maps to the
+      # WSL host gateway via extra_hosts below — Linux Docker doesn't
+      # resolve it automatically the way Docker Desktop does.
+      OLLAMA_HOST: "${OLLAMA_HOST:-http://host.docker.internal:11434}"
+      KNOLDR_OLLAMA_FAST_MODEL: "${KNOLDR_OLLAMA_FAST_MODEL:-gemma4:e4b}"
+      KNOLDR_OLLAMA_JURY_MODELS: "${KNOLDR_OLLAMA_JURY_MODELS:-gemma4:e4b,qwen2.5:14b}"
+      # Self-hosted SearXNG meta-search for web_search fallback when
+      # an entry has no usable cited sources.
+      SEARXNG_URL: "${SEARXNG_URL:-http://searxng:8080}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - knoldr-codex:/root/.codex
       - knoldr-gemini:/root/.gemini
@@ -55,6 +66,24 @@ services:
       retries: 5
     profiles:
       - test
+
+  # SearXNG meta-search: aggregates Google, Bing, DuckDuckGo, Wikipedia,
+  # GitHub, arXiv etc. Self-hosted so we get unmetered queries and can
+  # tune engine selection per claim type. JSON API enabled via baked-in
+  # settings.yml (Docker Desktop on WSL has issues with bind-mounting
+  # to /etc/searxng, so we COPY the config into the image instead).
+  searxng:
+    build:
+      context: .
+      dockerfile: Dockerfile.searxng
+    environment:
+      BASE_URL: "http://searxng:8080/"
+      INSTANCE_NAME: "knoldr-searxng"
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    restart: unless-stopped
 
 volumes:
   knoldr-data:

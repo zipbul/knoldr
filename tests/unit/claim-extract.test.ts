@@ -5,10 +5,9 @@ import { extractClaims, CLAIM_TYPES } from "../../src/claim/extract";
 // returning []. The LLM-bound success path is exercised by integration
 // tests; unit tests verify the contract around failure.
 beforeAll(() => {
-  process.env.KNOLDR_CODEX_CLI = "false";
-  process.env.KNOLDR_GEMINI_CLI = "false";
   process.env.OLLAMA_HOST = "http://127.0.0.1:1";
   process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
+  delete process.env.KNOLDR_ENABLE_CLOUD_CLI;
 });
 
 describe("extractClaims — LLM unavailable", () => {

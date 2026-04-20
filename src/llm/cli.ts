@@ -42,25 +42,14 @@ interface CliConfig {
   command?: string[];
 }
 
-// Verified against OpenAI Codex docs + gemini CLI probe:
-//
-// - Codex on ChatGPT Plus accepts `gpt-5.4`, `gpt-5.4-mini`,
-//   `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`. The common
-//   API-style names (`gpt-5-mini`, `gpt-4o-mini`, `o4-mini`, …) are
-//   rejected because Codex uses its own Codex-tier naming. `gpt-5.4-mini`
-//   is the efficient pick for knoldr's JSON-extraction workload —
-//   running this on the default `gpt-5.4` burned the Plus daily cap
-//   in a single research storm.
-// - Gemini CLI v0.37.2 accepts `gemini-2.5-flash-lite` with its own
-//   quota bucket (separate from `gemini-2.5-flash`). Right pick for
-//   the same reason.
-const CODEX_MODEL = "gpt-5.4-mini";
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
-
-// Local Ollama is the primary path now — cloud CLIs are jury-only
-// fallback to keep daily quotas. Defaults match the host's pulled tags.
-// Env vars are read at CALL time (not module load) so tests / hot-
-// reload paths can redirect OLLAMA_HOST without re-importing.
+// Default deployment is local-only via Ollama. Cloud CLIs (OpenAI
+// Codex, Google Gemini) are OPT-IN via KNOLDR_ENABLE_CLOUD_CLI=true
+// and opt-in per-model via KNOLDR_CLOUD_CODEX_MODEL / KNOLDR_CLOUD_GEMINI_MODEL.
+// The prior design wired cloud CLIs in as "jury fallback" but in
+// practice that path fired the free-tier quota limits (observed
+// TerminalQuotaError in production) without adding value when
+// Ollama was healthy. Keeping them reachable only when explicitly
+// enabled avoids the noise and the subprocess spawn overhead.
 const ollamaHost = () => process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const fastModel = () => process.env.KNOLDR_OLLAMA_FAST_MODEL ?? "gemma4:e4b";
 const juryModels = () =>
@@ -69,33 +58,48 @@ const juryModels = () =>
     .map((s) => s.trim())
     .filter(Boolean);
 
+function cloudCliEnabled(): boolean {
+  const v = process.env.KNOLDR_ENABLE_CLOUD_CLI;
+  return v === "1" || v === "true" || v === "yes";
+}
+
+function cloudConfigs(): CliConfig[] {
+  if (!cloudCliEnabled()) return [];
+  const out: CliConfig[] = [];
+  const codexModel = process.env.KNOLDR_CLOUD_CODEX_MODEL;
+  if (codexModel && process.env.KNOLDR_CODEX_CLI) {
+    out.push({
+      name: "codex",
+      command: process.env.KNOLDR_CODEX_CLI.split(/\s+/),
+      model: codexModel,
+      mode: "codex",
+    });
+  }
+  const geminiModel = process.env.KNOLDR_CLOUD_GEMINI_MODEL;
+  if (geminiModel && process.env.KNOLDR_GEMINI_CLI) {
+    out.push({
+      name: "gemini",
+      command: process.env.KNOLDR_GEMINI_CLI.split(/\s+/),
+      model: geminiModel,
+      mode: "generic",
+    });
+  }
+  return out;
+}
+
 function ollamaConfig(model: string): CliConfig {
   return { name: `ollama:${model}`, model, mode: "ollama" };
 }
 
 function getFastConfigs(): CliConfig[] {
-  // Single-call path (decompose / classify / extract). Local first,
-  // cloud only if Ollama is unreachable.
-  const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
-  const geminiCli = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
-  return [
-    ollamaConfig(fastModel()),
-    { name: "codex", command: codexCli.split(/\s+/), model: CODEX_MODEL, mode: "codex" },
-    { name: "gemini", command: geminiCli.split(/\s+/), model: GEMINI_MODEL, mode: "generic" },
-  ];
+  // Single-call path (decompose / classify / extract). Ollama only
+  // by default; cloud CLIs append when opt-in flag is set.
+  return [ollamaConfig(fastModel()), ...cloudConfigs()];
 }
 
 function getJuryConfigs(): CliConfig[] {
-  // Jury path needs *different* models for diverse votes. Local jury
-  // models first; cloud CLIs added as a 3rd voter only when healthy.
-  const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
-  const geminiCli = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
-  const local = juryModels().map(ollamaConfig);
-  return [
-    ...local,
-    { name: "codex", command: codexCli.split(/\s+/), model: CODEX_MODEL, mode: "codex" },
-    { name: "gemini", command: geminiCli.split(/\s+/), model: GEMINI_MODEL, mode: "generic" },
-  ];
+  // Jury path needs *different* models for diverse votes.
+  return [...juryModels().map(ollamaConfig), ...cloudConfigs()];
 }
 
 // ---- Quota circuit breaker ----

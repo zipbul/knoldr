@@ -6,10 +6,9 @@ import { decomposeQuery } from "../../src/collect/query-decompose";
 // now primary (role-separated /api/chat) so we must also point its
 // host at an unreachable address for the fallback path to trigger.
 beforeAll(() => {
-  process.env.KNOLDR_CODEX_CLI = "false";
-  process.env.KNOLDR_GEMINI_CLI = "false";
   process.env.OLLAMA_HOST = "http://127.0.0.1:1";
   process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
+  delete process.env.KNOLDR_ENABLE_CLOUD_CLI;
 });
 
 describe("Query Decompose", () => {

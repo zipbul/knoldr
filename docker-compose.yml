@@ -35,6 +35,11 @@ services:
       KNOLDR_OLLAMA_FAST_MODEL: "${KNOLDR_OLLAMA_FAST_MODEL:-gemma4:e4b}"
       KNOLDR_OLLAMA_JURY_MODELS: "${KNOLDR_OLLAMA_JURY_MODELS:-gemma4:e4b,qwen2.5:14b}"
       KNOLDR_OLLAMA_TIMEOUT_MS: "${KNOLDR_OLLAMA_TIMEOUT_MS:-120000}"
+      # Cap onnxruntime per-op threads to prevent NLI / reranker /
+      # embedding model forwards from saturating every core on the
+      # host. 2 is enough for a 60s verify tick to drain batchSize=6
+      # on our hardware while leaving headroom for other workers.
+      KNOLDR_ONNX_THREADS: "${KNOLDR_ONNX_THREADS:-2}"
       # Self-hosted SearXNG meta-search for web_search fallback when
       # an entry has no usable cited sources.
       SEARXNG_URL: "${SEARXNG_URL:-http://searxng:8080}"

@@ -225,19 +225,22 @@ export function startServer() {
     });
   }, 120 * 1000);
 
-  // Claim verify queue processor — every 60 seconds, batch=15.
-  // Bumped from (90s, 5) after observing the queue accumulating
-  // faster than it drained: each verify now spans 1-3 minutes with
-  // the full multi-stage pipeline, but Promise.allSettled overlaps
-  // the network-bound waits across the batch so 15 in parallel
-  // finishes in roughly the time of the slowest one. NLI/reranker
-  // forward passes still serialize on the JS thread but they're
-  // microseconds compared to the URL-fetch / LLM HTTP waits.
+  // Claim verify queue processor — every 60 seconds, batch=6.
+  //
+  // Sizing tradeoff: each claim's verify runs source-fetch + JSDOM
+  // parse + NLI forward + reranker forward + embedding + optional
+  // CoVe/jury branches. The ML passes run on onnxruntime worker
+  // threads that saturate whatever cores are available, so a batch
+  // of 15 fanned out with Promise.allSettled was eating ~24 cores
+  // and starving every other worker in the same container. 6 is
+  // small enough to leave headroom for reclassify / claim extract
+  // / invariants / health, yet large enough to overlap the
+  // network-bound waits meaningfully.
   setInterval(async () => {
     await withClusterLock("verify-queue", async () => {
       try {
         const { processVerifyQueue, updateFactualityScore } = await import("../claim/verify");
-        const processed = await processVerifyQueue(15);
+        const processed = await processVerifyQueue(6);
         if (processed > 0) {
         // Recompute factuality for entries touched by this batch.
         const { db } = await import("../db/connection");

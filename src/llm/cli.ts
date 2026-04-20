@@ -47,26 +47,60 @@ function getJuryTargets(): LlmTarget[] {
 }
 
 // ---- Health circuit breaker ----
-// Skip a model for a cooldown window after repeated failures so a
-// single broken model doesn't stall the whole verify queue. Ollama
-// surfaces "model not found" / connection failures that we don't
-// want to retry on every tick.
-const CIRCUIT_COOLDOWN_MS = 5 * 60 * 1000;
-const unhealthyUntil = new Map<string, number>();
+// Only open the circuit for SUSTAINED failures. A single timeout /
+// transient error is common (Ollama can be busy loading another
+// model, the host may have just swapped) and should not kill the
+// path for minutes. The prior "one failure → 5 min cooldown"
+// design turned a single blip into 56 downstream "no healthy LLM"
+// errors in production logs.
+//
+// Contract: a target goes unhealthy after `FAIL_THRESHOLD`
+// consecutive failures. One success resets the counter.
+const FAIL_THRESHOLD = 5;
+const CIRCUIT_COOLDOWN_MS = 2 * 60 * 1000;
+interface Breaker {
+  failures: number;
+  unhealthyUntil: number;
+}
+const breakers = new Map<string, Breaker>();
 
-function isHealthy(name: string): boolean {
-  const until = unhealthyUntil.get(name);
-  if (!until) return true;
-  if (Date.now() >= until) {
-    unhealthyUntil.delete(name);
-    return true;
+function getBreaker(name: string): Breaker {
+  let b = breakers.get(name);
+  if (!b) {
+    b = { failures: 0, unhealthyUntil: 0 };
+    breakers.set(name, b);
   }
-  return false;
+  return b;
 }
 
-function markUnhealthy(name: string): void {
-  unhealthyUntil.set(name, Date.now() + CIRCUIT_COOLDOWN_MS);
-  logger.warn({ model: name, cooldownMs: CIRCUIT_COOLDOWN_MS }, "model marked unhealthy");
+function isHealthy(name: string): boolean {
+  const b = getBreaker(name);
+  if (b.unhealthyUntil && Date.now() >= b.unhealthyUntil) {
+    // Cooldown elapsed — half-open: allow one probe call.
+    b.unhealthyUntil = 0;
+    b.failures = 0;
+  }
+  return b.unhealthyUntil === 0;
+}
+
+function recordFailure(name: string): void {
+  const b = getBreaker(name);
+  b.failures++;
+  if (b.failures >= FAIL_THRESHOLD) {
+    b.unhealthyUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+    logger.warn(
+      { model: name, consecutiveFailures: b.failures, cooldownMs: CIRCUIT_COOLDOWN_MS },
+      "model circuit opened",
+    );
+  }
+}
+
+function recordSuccess(name: string): void {
+  const b = getBreaker(name);
+  if (b.failures > 0 || b.unhealthyUntil !== 0) {
+    b.failures = 0;
+    b.unhealthyUntil = 0;
+  }
 }
 
 /**
@@ -82,10 +116,12 @@ export async function callLlm(prompt: PromptInput): Promise<string> {
   for (const t of targets) {
     if (!isHealthy(t.name)) continue;
     try {
-      return await callOllama(t.model, structured);
+      const out = await callOllama(t.model, structured);
+      recordSuccess(t.name);
+      return out;
     } catch (err) {
       lastError = err as Error;
-      markUnhealthy(t.name);
+      recordFailure(t.name);
       logger.warn({ model: t.name, error: lastError.message }, "LLM call failed");
     }
   }
@@ -118,15 +154,14 @@ export async function callAllLlms(prompt: PromptInput): Promise<LlmVote[]> {
   const votes: LlmVote[] = [];
   for (let i = 0; i < settled.length; i++) {
     const result = settled[i]!;
+    const name = targets[i]!.name;
     if (result.status === "fulfilled") {
+      recordSuccess(name);
       votes.push(result.value);
     } else {
       const err = result.reason as Error;
-      markUnhealthy(targets[i]!.name);
-      logger.warn(
-        { model: targets[i]!.name, error: err.message },
-        "jury model failed",
-      );
+      recordFailure(name);
+      logger.warn({ model: name, error: err.message }, "jury model failed");
     }
   }
   return votes;

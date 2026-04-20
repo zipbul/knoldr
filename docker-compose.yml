@@ -58,20 +58,19 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
-    # Container CPU cap removed. The OMP/ORT/OPENBLAS/MKL/KNOLDR_ONNX
-    # thread caps above are the real guard: each model forward is
-    # bounded to 4 threads, so a verify tick of batchSize=6 cannot
-    # saturate more than ~24 threads worth of work even in the worst
-    # case, and the shared onnxruntime thread pool reuses slots so
-    # real-world usage stays well below that. The prior `cpus: 8`
-    # was a blunt safety net added before thread caps were in place;
-    # it was actively throttling legitimate verify work (batch=6
-    # couldn't drain in the 60s tick) while contributing nothing
-    # the thread caps don't already provide.
-    #
-    # Set KNOLDR_APP_CPUS in .env ONLY if the host needs reservation
-    # headroom for other workloads; otherwise let the thread caps
-    # do their job.
+    # GPU inference: NLI / reranker / QA / embedding model forwards
+    # run on CUDA via transformers.js' onnxruntime-node backend.
+    # Shares the host GPU with the finetune sidecar — both containers
+    # can run concurrently because inference only holds the GPU for
+    # the duration of each forward pass and finetune is a rare (once
+    # weekly) workload.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   db-test:
     build:

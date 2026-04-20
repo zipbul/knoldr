@@ -58,14 +58,20 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
-    # Hard cap on container CPU so a runaway verify tick can't
-    # dominate the host. 8 cores is enough for batch=6 verify +
-    # other workers with the thread caps above; raise if the host
-    # has more headroom to give.
-    deploy:
-      resources:
-        limits:
-          cpus: "${KNOLDR_APP_CPUS:-8}"
+    # Container CPU cap removed. The OMP/ORT/OPENBLAS/MKL/KNOLDR_ONNX
+    # thread caps above are the real guard: each model forward is
+    # bounded to 4 threads, so a verify tick of batchSize=6 cannot
+    # saturate more than ~24 threads worth of work even in the worst
+    # case, and the shared onnxruntime thread pool reuses slots so
+    # real-world usage stays well below that. The prior `cpus: 8`
+    # was a blunt safety net added before thread caps were in place;
+    # it was actively throttling legitimate verify work (batch=6
+    # couldn't drain in the 60s tick) while contributing nothing
+    # the thread caps don't already provide.
+    #
+    # Set KNOLDR_APP_CPUS in .env ONLY if the host needs reservation
+    # headroom for other workloads; otherwise let the thread caps
+    # do their job.
 
   db-test:
     build:

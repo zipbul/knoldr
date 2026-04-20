@@ -136,8 +136,22 @@ async function findConflictingObjects(
  * over-eager dispute that source_check can clear than to miss a real
  * factual conflict.
  */
+// Cache predicate functional-ness so every verify-hot-path claim
+// doesn't re-aggregate the full kg_relation table. 5-minute TTL means
+// a newly-added relation type picks up its true cardinality within one
+// calibration window without blocking the live verify queue.
+interface FunctionalCacheEntry {
+  functional: boolean;
+  expiresAt: number;
+}
+const FUNCTIONAL_TTL_MS = 5 * 60 * 1000;
+const functionalCache = new Map<string, FunctionalCacheEntry>();
+
 async function isFunctionalPredicate(predicate: string): Promise<boolean> {
   const pred = normalizePredicate(predicate);
+  const cached = functionalCache.get(pred);
+  if (cached && Date.now() < cached.expiresAt) return cached.functional;
+
   const rows = (await db.execute(sql`
     SELECT
       COUNT(DISTINCT r.target_entity_id)::float
@@ -150,6 +164,7 @@ async function isFunctionalPredicate(predicate: string): Promise<boolean> {
   `)) as unknown as Array<{ avg_objects_per_subject: number; total: number }>;
 
   const row = rows[0];
-  if (!row || row.total === 0) return true;
-  return row.avg_objects_per_subject < 1.5;
+  const functional = !row || row.total === 0 ? true : row.avg_objects_per_subject < 1.5;
+  functionalCache.set(pred, { functional, expiresAt: Date.now() + FUNCTIONAL_TTL_MS });
+  return functional;
 }

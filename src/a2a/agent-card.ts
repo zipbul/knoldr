@@ -1,4 +1,5 @@
 import type { AgentCard } from "@a2a-js/sdk";
+import pkg from "../../package.json" with { type: "json" };
 
 export const agentCard: AgentCard = {
   protocolVersion: "0.3.0",
@@ -6,7 +7,7 @@ export const agentCard: AgentCard = {
   description:
     "AI-native universal data platform. Searches stored knowledge and auto-collects from the web when results are insufficient. All skills accept JSON input via parts[0].data = { skill, input }.",
   url: `http://${process.env.KNOLDR_HOST ?? "0.0.0.0"}:${process.env.KNOLDR_PORT ?? "5100"}`,
-  version: "0.3.0",
+  version: pkg.version,
   capabilities: {
     streaming: true,
     pushNotifications: false,

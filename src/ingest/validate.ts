@@ -30,8 +30,8 @@ const rawStoreSchema = z.object({
 const structuredEntrySchema = z.object({
   title: z.string().min(1).max(500),
   content: z.string().min(1).max(50_000),
-  domain: z.array(z.string().max(50).regex(/^[a-z0-9-]+$/)).min(1).max(5),
-  tags: z.array(z.string().max(50).regex(/^[a-z0-9-]+$/)).max(20).optional(),
+  domain: z.array(z.string().max(50).regex(/^[\p{Ll}\p{Lo}\p{N}-]+$/u)).min(1).max(5),
+  tags: z.array(z.string().max(50).regex(/^[\p{Ll}\p{Lo}\p{N}-]+$/u)).max(20).optional(),
   language: z.string().regex(/^[a-z]{2}$/).optional(),
   decayRate: z.number().min(0.0001).max(0.1).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
@@ -123,8 +123,8 @@ export const decomposeResponseSchema = z.object({
     z.object({
       title: z.string().max(500),
       content: z.string().max(50_000),
-      domain: z.array(z.string().max(50).regex(/^[a-z0-9-]+$/)).min(1).max(5),
-      tags: z.array(z.string().max(50).regex(/^[a-z0-9-]+$/)).max(20).default([]),
+      domain: z.array(z.string().max(50).regex(/^[\p{Ll}\p{Lo}\p{N}-]+$/u)).min(1).max(5),
+      tags: z.array(z.string().max(50).regex(/^[\p{Ll}\p{Lo}\p{N}-]+$/u)).max(20).default([]),
       language: z.string().regex(/^[a-z]{2}$/),
       decayRate: z.number().min(0.0001).max(0.1),
     }),

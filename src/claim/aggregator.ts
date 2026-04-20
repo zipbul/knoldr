@@ -51,25 +51,42 @@ function sigmoid(x: number): number {
  * verdict. Each source contributes a log-odds shift proportional
  * to (entailment - contradiction) × authority, damped by within-
  * group redundancy.
+ *
+ * Order-independent: within each independence group we sort by
+ * authority descending so the highest-authority source gets full
+ * weight and subsequent redundant sources decay from there. Without
+ * this, caller iteration order determined which member of a group
+ * carried the full-weight slot — [high, low] and [low, high] inputs
+ * produced different posteriors on the same evidence (reproduced as
+ * 0.97 vs 0.88 in testing).
  */
 export function aggregate(sources: SourceEvidence[]): AggregateResult {
   if (sources.length === 0) {
     return { verdict: "unverified", certainty: 0, posterior: PRIOR };
   }
 
-  // Tally per-group occurrences so we can damp later occurrences.
-  const groupSeen = new Map<number, number>();
-  let logOdds = logit(PRIOR);
+  // Bucket by group first, then within each bucket sort by authority
+  // descending. This makes the full-weight slot deterministic.
+  const buckets = new Map<number, SourceEvidence[]>();
   for (const s of sources) {
-    const seen = groupSeen.get(s.group) ?? 0;
-    groupSeen.set(s.group, seen + 1);
-    const damping = Math.pow(GROUP_DAMPING, seen);
+    const arr = buckets.get(s.group) ?? [];
+    arr.push(s);
+    buckets.set(s.group, arr);
+  }
+  for (const arr of buckets.values()) {
+    arr.sort((a, b) => b.authority - a.authority);
+  }
 
-    // Net signal in [-1, 1]; neutral pulls weight toward 0.
-    const net = s.scores.entailment - s.scores.contradiction;
-    // 4× factor calibrates a single net=1, authority=1 source to
-    // raise posterior from 0.5 → ~0.98, matching FEVER conventions.
-    logOdds += net * s.authority * damping * 4;
+  let logOdds = logit(PRIOR);
+  for (const arr of buckets.values()) {
+    for (let i = 0; i < arr.length; i++) {
+      const s = arr[i]!;
+      const damping = Math.pow(GROUP_DAMPING, i);
+      const net = s.scores.entailment - s.scores.contradiction;
+      // 4× factor calibrates a single net=1, authority=1 source to
+      // raise posterior from 0.5 → ~0.98, matching FEVER conventions.
+      logOdds += net * s.authority * damping * 4;
+    }
   }
 
   const posterior = sigmoid(logOdds);

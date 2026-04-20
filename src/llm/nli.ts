@@ -72,9 +72,18 @@ async function getHandles(modelId: string): Promise<CachedHandles> {
   return promise;
 }
 
-/** Hangul, CJK, Hiragana/Katakana, Cyrillic → multilingual model. */
+/**
+ * Route to the multilingual model whenever the hypothesis contains a
+ * non-Latin script. The previous range-list only covered Hangul / CJK /
+ * Hiragana-Katakana / Cyrillic — Arabic / Hebrew / Thai / Devanagari /
+ * Greek / etc. silently fell through to the English-only model and
+ * returned junk entailment scores. Use Unicode script properties so
+ * every non-ASCII script is handled uniformly.
+ */
 function pickModel(text: string): string {
-  if (/[\u3131-\u318E\uAC00-\uD7A3\u3040-\u30FF\u4E00-\u9FFF\u0400-\u04FF]/.test(text)) {
+  // Anything that is NOT a basic-Latin letter, digit, or punctuation is
+  // treated as non-Latin and routed through the multilingual model.
+  if (/[^\p{Script=Latin}\p{N}\s\p{P}\p{S}]/u.test(text)) {
     return NLI_MODEL_MULTI;
   }
   return NLI_MODEL_EN;
@@ -106,11 +115,25 @@ async function rawNliScore(
   const out = await h.model(inputs);
   const probs = Array.from(h.softmax(out.logits.data));
   const scores: NliScores = { entailment: 0, neutral: 0, contradiction: 0 };
+  // Label names vary by model — some ship UPPERCASE ("ENTAILMENT"),
+  // some use "SUPPORTS"/"REFUTES"/"NOT ENOUGH INFO" (FEVER-trained).
+  // Normalize before matching so a model swap doesn't silently zero
+  // every score and break the verify pipeline.
+  const mapped: Array<"entailment" | "neutral" | "contradiction" | null> = [];
   for (let i = 0; i < probs.length; i++) {
-    const label = h.id2label[i];
-    if (label === "entailment") scores.entailment = probs[i]!;
-    else if (label === "neutral") scores.neutral = probs[i]!;
-    else if (label === "contradiction") scores.contradiction = probs[i]!;
+    const raw = String(h.id2label[i] ?? "").toLowerCase();
+    if (raw.includes("entail") || raw.includes("support")) mapped.push("entailment");
+    else if (raw.includes("contradict") || raw.includes("refute")) mapped.push("contradiction");
+    else if (raw.includes("neutral") || raw.includes("not_enough") || raw.includes("not enough") || raw === "nei")
+      mapped.push("neutral");
+    else mapped.push(null);
+  }
+  if (mapped.every((l) => l === null)) {
+    throw new Error(`NLI model ${modelId} exposed unknown id2label: ${JSON.stringify(h.id2label)}`);
+  }
+  for (let i = 0; i < probs.length; i++) {
+    const label = mapped[i];
+    if (label) scores[label] = probs[i]!;
   }
   return scores;
 }
@@ -133,9 +156,8 @@ async function translateToEnglish(
   hypothesis: string,
 ): Promise<{ premise: string; hypothesis: string } | null> {
   try {
-    const out = await callLlm(
-      `${TRANSLATE_PROMPT}\n\nPREMISE:\n${premise.slice(0, 4000)}\n\nHYPOTHESIS:\n${hypothesis.slice(0, 1000)}`,
-    );
+    const user = `PREMISE:\n${premise.slice(0, 4000)}\n\nHYPOTHESIS:\n${hypothesis.slice(0, 1000)}`;
+    const out = await callLlm({ system: TRANSLATE_PROMPT, user });
     const parsed = translationSchema.parse(extractJson(out));
     return { premise: parsed.premise_en, hypothesis: parsed.hypothesis_en };
   } catch (err) {

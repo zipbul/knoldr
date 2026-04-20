@@ -1,4 +1,4 @@
-import { and, eq, desc, inArray } from "drizzle-orm";
+import { and, eq, desc, inArray, or, sql } from "drizzle-orm";
 import { db } from "../db/connection";
 import { claim, entryScore } from "../db/schema";
 
@@ -13,8 +13,17 @@ export interface ClaimSummary {
 const MAX_CLAIMS_PER_ENTRY = 5;
 
 /**
- * Fetch up to MAX_CLAIMS_PER_ENTRY claims per entry, preferring factual
- * verified claims with higher certainty.
+ * Fetch up to MAX_CLAIMS_PER_ENTRY claims per entry, preferring high-
+ * certainty claims. Ordering carries `claim.id` as the final tie-
+ * breaker so the results are deterministic across repeated queries
+ * — the previous `ORDER BY certainty DESC, created_at DESC` without a
+ * stable secondary key produced different orderings on equal-certainty
+ * rows (the comment even claimed "by id for stability" but the id
+ * wasn't in the ORDER BY list).
+ *
+ * Also threads `entry_created_at` through the WHERE clause so the
+ * composite index `(entry_id, entry_created_at)` actually gets used —
+ * without it Postgres only utilizes the first column.
  */
 export async function fetchClaimsForEntries(
   entries: Array<{ id: string; createdAt: string }>,
@@ -22,7 +31,17 @@ export async function fetchClaimsForEntries(
   const byEntry = new Map<string, ClaimSummary[]>();
   if (entries.length === 0) return byEntry;
 
-  const ids = entries.map((e) => e.id);
+  // Build (entry_id, entry_created_at) pair predicate. When all entries
+  // share a single created_at column this produces the same plan as a
+  // plain IN, but in the heterogeneous case Postgres can use the
+  // composite index efficiently.
+  const pairPredicates = entries.map((e) =>
+    and(
+      eq(claim.entryId, e.id),
+      eq(claim.entryCreatedAt, new Date(e.createdAt)),
+    )!,
+  );
+
   const rows = await db
     .select({
       id: claim.id,
@@ -33,11 +52,11 @@ export async function fetchClaimsForEntries(
       certainty: claim.certainty,
     })
     .from(claim)
-    .where(inArray(claim.entryId, ids))
+    .where(or(...pairPredicates))
     .orderBy(
-      // verified first, then by certainty desc, then by id for stability
       desc(claim.certainty),
       desc(claim.createdAt),
+      sql`${claim.id} DESC`,
     );
 
   for (const r of rows) {

@@ -86,8 +86,11 @@ export function rank(
     const authority = row.authority;
     // Use publication date from source metadata when available; fall back to
     // ingest time. Without this, a 10-year-old paper ingested today scores
-    // as "fresh" because createdAt = now.
-    const referenceDate = extractPublishedAt(row.metadata) ?? row.createdAt;
+    // as "fresh" because createdAt = now. A future-dated `publishedAt` is
+    // clamped to now so a document can't inflate its freshness by claiming
+    // publication in the future.
+    const metaDate = extractPublishedAt(row.metadata);
+    const referenceDate = metaDate && metaDate.getTime() <= now ? metaDate : row.createdAt;
     const daysSinceReference = Math.max(
       0,
       (now - referenceDate.getTime()) / (1000 * 60 * 60 * 24),
@@ -96,8 +99,13 @@ export function rank(
 
     let termCoverage = 1.0;
     if (normalizedTerms.length > 0) {
+      // Word-boundary matching using Unicode letter/number classes so
+      // "go" doesn't claim coverage against "google" and "ai" doesn't
+      // match "detail". Each term is escaped and anchored to \b-style
+      // boundaries implemented via negative lookaround (the native \b
+      // only considers ASCII word chars).
       const text = `${row.title} ${row.content}`.toLowerCase();
-      const matched = normalizedTerms.filter((t) => text.includes(t)).length;
+      const matched = normalizedTerms.filter((t) => containsWord(text, t)).length;
       termCoverage = matched / normalizedTerms.length;
     }
 
@@ -142,6 +150,19 @@ function getTrustLevel(authority: number): string {
   if (authority >= 0.7) return "high";
   if (authority >= 0.4) return "medium";
   return "low";
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsWord(haystack: string, term: string): boolean {
+  if (!term) return false;
+  const re = new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])${escapeRegex(term)}(?:[^\\p{L}\\p{N}]|$)`,
+    "u",
+  );
+  return re.test(haystack);
 }
 
 function extractPublishedAt(metadata: unknown): Date | null {

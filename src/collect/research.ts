@@ -142,50 +142,71 @@ export async function research(
   );
   progress.emit("classified");
 
-  // Step 5: Mode 2 ingest (0 LLM)
+  // Step 5: Mode 2 ingest (0 LLM) — bounded parallelism.
+  //
+  // Previous implementation ran ingest sequentially on up to 100
+  // chunks, which easily exhausted the 5-minute deadline because each
+  // ingest does embedding (CPU) + HNSW lookup + TX. Parallelizing
+  // uncapped would overwhelm Postgres and the embedding pipeline
+  // itself, so we cap at CONCURRENCY simultaneous ingests — empirical
+  // sweet spot on the postgres max_connections=80 pool without
+  // starving other workers.
   progress.emit("ingesting", { count: allChunks.length });
   const PROGRESS_STRIDE = Math.max(1, Math.floor(allChunks.length / 10));
+  const CONCURRENCY = 6;
+  let nextIdx = 0;
+  let completed = 0;
 
-  for (let i = 0; i < allChunks.length; i++) {
-    if (Date.now() > deadline) {
-      result.status = "partial";
-      break;
-    }
-
-    const chunk = allChunks[i]!;
-    const meta = metas[i]!;
-
-    try {
-      const storeInput = parseStoreInput({
-        entries: [
-          {
-            title: chunk.title,
-            content: chunk.text,
-            domain: meta.domain,
-            tags: meta.tags,
-            language: meta.language,
-            decayRate: meta.decayRate,
-          },
-        ],
-        sources: [{ url: chunk.url, sourceType: chunk.sourceType }],
-      });
-      const ingested = await ingest(storeInput);
-      for (const r of ingested) {
-        result.entries.push({ entryId: r.entryId, action: r.action });
-        if (r.action === "stored") result.entriesStored++;
+  async function worker() {
+    while (true) {
+      if (Date.now() > deadline) {
+        result.status = "partial";
+        return;
       }
-    } catch (err) {
-      logger.warn({ url: chunk.url, error: (err as Error).message }, "chunk ingest failed");
-    }
-
-    if ((i + 1) % PROGRESS_STRIDE === 0 || i + 1 === allChunks.length) {
-      progress.emit("ingest_progress", {
-        processed: i + 1,
-        total: allChunks.length,
-        stored: result.entriesStored,
-      });
+      const i = nextIdx++;
+      if (i >= allChunks.length) return;
+      const chunk = allChunks[i]!;
+      const meta = metas[i]!;
+      try {
+        const storeInput = parseStoreInput({
+          entries: [
+            {
+              title: chunk.title,
+              content: chunk.text,
+              domain: meta.domain,
+              tags: meta.tags,
+              language: meta.language,
+              decayRate: meta.decayRate,
+            },
+          ],
+          sources: [{ url: chunk.url, sourceType: chunk.sourceType }],
+        });
+        const ingested = await ingest(storeInput);
+        for (const r of ingested) {
+          // Skip rejected rows from the exported `entries` list — they
+          // have no useful id, and `action:"stored"` is the only one
+          // the caller tracks. Rejections are counted separately via
+          // ingestionTotal metric.
+          if (r.entryId) {
+            result.entries.push({ entryId: r.entryId, action: r.action });
+          }
+          if (r.action === "stored") result.entriesStored++;
+        }
+      } catch (err) {
+        logger.warn({ url: chunk.url, error: (err as Error).message }, "chunk ingest failed");
+      }
+      completed++;
+      if (completed % PROGRESS_STRIDE === 0 || completed === allChunks.length) {
+        progress.emit("ingest_progress", {
+          processed: completed,
+          total: allChunks.length,
+          stored: result.entriesStored,
+        });
+      }
     }
   }
+
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
   logger.info(
     {
@@ -210,10 +231,22 @@ function passesTopicGate(hit: SearchHit, topicTerms: string[]): boolean {
 }
 
 function estimateSourceType(url: string): string {
-  if (url.includes("github.com")) return "github_release";
-  if (url.includes("arxiv.org")) return "research_paper";
-  if (url.includes(".gov") || url.includes(".edu")) return "official_docs";
-  if (url.includes("medium.com") || url.includes("dev.to")) return "established_blog";
-  if (url.includes("stackoverflow.com") || url.includes("reddit.com")) return "community_forum";
+  // Host-based matching so paths like /evil/fake-github.com/... can't
+  // impersonate a trusted publisher. `hostMatches` accepts an exact
+  // host or any subdomain of it.
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "unknown";
+  }
+  const is = (...domains: string[]) =>
+    domains.some((d) => host === d || host.endsWith(`.${d}`));
+
+  if (is("github.com")) return "github_release";
+  if (is("arxiv.org")) return "research_paper";
+  if (host.endsWith(".gov") || host.endsWith(".edu")) return "official_docs";
+  if (is("medium.com", "dev.to")) return "established_blog";
+  if (is("stackoverflow.com", "reddit.com")) return "community_forum";
   return "unknown";
 }

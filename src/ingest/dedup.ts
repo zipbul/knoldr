@@ -1,29 +1,40 @@
 import { db } from "../db/connection";
 import { entry } from "../db/schema";
-import { sql } from "drizzle-orm";
+import { sql, eq } from "drizzle-orm";
 import { logger } from "../observability/logger";
 
 const DISTANCE_THRESHOLD = 0.05; // cosine distance < 0.05 = similarity > 0.95
+const CANDIDATE_LIMIT = 8;
 
 /**
- * Check if an embedding is a near-duplicate of any existing entry.
- * No domain/time restrictions — compares against ALL active entries.
- * Returns all entries within threshold for logging.
+ * Check if an embedding is a near-duplicate of an existing ACTIVE entry.
+ *
+ * Uses the HNSW index via `ORDER BY embedding <=> $vec LIMIT N` — this
+ * is the only ANN-eligible shape for pgvector's hnsw operator class. A
+ * bare `WHERE distance < threshold` would force a Seq Scan and make
+ * every ingest O(N) on entry count. With the LIMIT form, the index
+ * returns a small approximate top-N and we filter by the distance
+ * threshold in JS.
+ *
+ * Filters to status='active' so draft / soft-deleted rows don't count
+ * against new ingestions.
  */
 export async function isDuplicate(
   embedding: number[],
 ): Promise<boolean> {
   const vecStr = `[${embedding.join(",")}]`;
 
-  const duplicates = await db
+  const candidates = await db
     .select({
       id: entry.id,
       distance: sql<number>`${entry.embedding} <=> ${vecStr}::vector`,
     })
     .from(entry)
-    .where(
-      sql`${entry.embedding} <=> ${vecStr}::vector < ${DISTANCE_THRESHOLD}`,
-    );
+    .where(eq(entry.status, "active"))
+    .orderBy(sql`${entry.embedding} <=> ${vecStr}::vector`)
+    .limit(CANDIDATE_LIMIT);
+
+  const duplicates = candidates.filter((c) => c.distance < DISTANCE_THRESHOLD);
 
   if (duplicates.length > 0) {
     logger.debug(

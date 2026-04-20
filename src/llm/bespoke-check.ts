@@ -56,11 +56,15 @@ export async function bespokeCheck(
     const json = (await res.json()) as { response?: string };
     const raw = (json.response ?? "").trim();
     const lower = raw.toLowerCase();
-    // Accept any "yes"-prefixed or "no"-prefixed answer; longer
-    // prose responses are common when temperature is non-zero, but
-    // we asked for one word and got it 99% of the time.
-    if (lower.startsWith("yes")) return { supported: true, confidence: 0.85, rawAnswer: raw };
-    if (lower.startsWith("no")) return { supported: false, confidence: 0.85, rawAnswer: raw };
+    // Recognize the common English affirmatives/negatives at word
+    // boundaries. The previous `startsWith` missed "yeah", "yep",
+    // "nope" entirely and classified them as ambiguous (0.3).
+    if (/^(yes|yeah|yep|yup|correct|true|supported|affirmative)\b/.test(lower)) {
+      return { supported: true, confidence: 0.85, rawAnswer: raw };
+    }
+    if (/^(no|nope|nah|false|incorrect|unsupported|negative)\b/.test(lower)) {
+      return { supported: false, confidence: 0.85, rawAnswer: raw };
+    }
     // Ambiguous — treat as low-confidence "neutral".
     return { supported: false, confidence: 0.3, rawAnswer: raw };
   } catch (err) {

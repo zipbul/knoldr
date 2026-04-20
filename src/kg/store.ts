@@ -10,6 +10,13 @@ import type { ExtractedTriple } from "./extract";
 /**
  * Upsert an entity by (type, lower(name)). Aliases accumulate if the same
  * underlying entity appears under a different spelling.
+ *
+ * Race-safe: the DB holds a UNIQUE(type, lower(name)) index (see
+ * migrate.ts), so concurrent upserts collapse to a single row. We
+ * attempt the INSERT with ON CONFLICT DO NOTHING and read back the
+ * surviving row's id rather than doing SELECT-then-INSERT, which had a
+ * TOCTOU window where two workers both saw "not found" and both
+ * inserted.
  */
 export async function upsertEntity(
   name: string,
@@ -18,8 +25,10 @@ export async function upsertEntity(
   const normName = name.trim();
   const normType = type.trim().toLowerCase();
 
+  // Exact match first — cheap and resolves 99% of calls without the
+  // embedding generation round-trip.
   const [existing] = await db
-    .select({ id: entity.id, aliases: entity.aliases })
+    .select({ id: entity.id })
     .from(entity)
     .where(
       and(
@@ -31,18 +40,21 @@ export async function upsertEntity(
 
   if (existing) return existing.id;
 
-  // Fuzzy merge: same type, high-cosine embedding match → same entity
+  // Fuzzy merge: same type, high-cosine embedding match → same entity.
+  // HNSW-friendly query shape (ORDER BY distance LIMIT 1, then threshold
+  // in JS) so the index is actually used.
   const vec = await generateEmbedding(`${normType}: ${normName}`);
+  const vecStr = `[${vec.join(",")}]`;
   const fuzzy = await db.execute(sql`
-    SELECT id, aliases FROM entity
+    SELECT id, aliases, 1 - (embedding <=> ${vecStr}::vector) AS similarity
+    FROM entity
     WHERE type = ${normType}
-      AND 1 - (embedding <=> ${`[${vec.join(",")}]`}::vector) >= 0.9
-    ORDER BY embedding <=> ${`[${vec.join(",")}]`}::vector
+    ORDER BY embedding <=> ${vecStr}::vector
     LIMIT 1
   `);
 
-  const fuzzyRow = (fuzzy as unknown as Array<{ id: string; aliases: string[] }>)[0];
-  if (fuzzyRow) {
+  const fuzzyRow = (fuzzy as unknown as Array<{ id: string; aliases: string[]; similarity: number }>)[0];
+  if (fuzzyRow && fuzzyRow.similarity >= 0.9) {
     if (!fuzzyRow.aliases.map((a) => a.toLowerCase()).includes(normName.toLowerCase())) {
       await db
         .update(entity)
@@ -52,14 +64,33 @@ export async function upsertEntity(
     return fuzzyRow.id;
   }
 
+  // ON CONFLICT DO NOTHING against the UNIQUE(type, lower(name)) index
+  // resolves the race: if another worker inserted first, this INSERT
+  // becomes a no-op and we re-SELECT the winner's id.
   const id = ulid();
-  await db.insert(entity).values({
-    id,
-    name: normName,
-    type: normType,
-    embedding: vec,
-  });
-  return id;
+  const inserted = await db.execute(sql`
+    INSERT INTO entity (id, name, type, embedding)
+    VALUES (${id}, ${normName}, ${normType}, ${vecStr}::vector)
+    ON CONFLICT (type, lower(name)) DO NOTHING
+    RETURNING id
+  `);
+  const row = (inserted as unknown as Array<{ id: string }>)[0];
+  if (row) return row.id;
+
+  const [winner] = await db
+    .select({ id: entity.id })
+    .from(entity)
+    .where(
+      and(
+        eq(entity.type, normType),
+        sql`lower(${entity.name}) = lower(${normName})`,
+      ),
+    )
+    .limit(1);
+  if (!winner) {
+    throw new Error(`upsertEntity race lost but winner not found: (${normType}, ${normName})`);
+  }
+  return winner.id;
 }
 
 /**

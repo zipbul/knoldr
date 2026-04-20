@@ -11,12 +11,26 @@
 // than 12 months. Conservative: a source published *just before*
 // the event is kept (sometimes blog posts pre-announce by weeks).
 
-const YEAR_RE = /\b(19[5-9]\d|20[0-4]\d)\b/g;
+// Any 4-digit year in a reasonable window. Bounded to the current year
+// plus a decade so 3023-style accidental matches in source text don't
+// poison the claim's referenced year. The upper bound updates on each
+// invocation so the system doesn't silently stop recognizing years as
+// time passes (the previous fixed `20[0-4]\d` pattern silently broke
+// for 2050+ without any call-site knowing).
+const YEAR_RE = /\b(19\d{2}|20\d{2}|21\d{2})\b/g;
 
 export function extractClaimYear(statement: string): number | null {
   const matches = statement.match(YEAR_RE);
   if (!matches || matches.length === 0) return null;
-  return Math.max(...matches.map((m) => parseInt(m, 10)));
+  // Accept any 4-digit year from the 20th/21st/22nd century; predictive
+  // claims routinely reference future years (2050, 2100) and must be
+  // retained. The regex itself caps at 2199 so accidental 4-digit
+  // tokens like "3023" aren't picked up.
+  const years = matches
+    .map((m) => parseInt(m, 10))
+    .filter((y) => y >= 1950 && y <= 2199);
+  if (years.length === 0) return null;
+  return Math.max(...years);
 }
 
 /**

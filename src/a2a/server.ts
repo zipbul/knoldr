@@ -6,8 +6,15 @@ import {
 } from "@a2a-js/sdk/server";
 import { agentCard } from "./agent-card";
 import { KnoldrExecutor } from "./dispatcher";
-import { authenticate } from "./auth";
+import { authenticate, requireTokenOrThrow } from "./auth";
 import { logger } from "../observability/logger";
+import { withClusterLock } from "../observability/worker-lock";
+
+// Hard cap on request body size. A2A payloads are JSON-RPC with small
+// `input` objects; any legitimate request is <1MB. Anything larger is
+// either buggy client batching or an attempt to exhaust memory by
+// streaming a huge body before zod validation runs.
+const MAX_BODY_BYTES = 1 * 1024 * 1024;
 
 let transportHandler: JsonRpcTransportHandler;
 
@@ -30,6 +37,7 @@ function getTransportHandler(): JsonRpcTransportHandler {
 }
 
 export function startServer() {
+  requireTokenOrThrow();
   const port = Number(process.env.KNOLDR_PORT ?? 5100);
   const host = process.env.KNOLDR_HOST ?? "0.0.0.0";
 
@@ -73,8 +81,35 @@ export function startServer() {
           );
         }
 
+        // Enforce body-size cap before parsing. We read the body via
+        // req.arrayBuffer() (not req.json()) so a client that lies about
+        // Content-Length can't sneak past the limit — we count the
+        // actual bytes we consumed.
+        const declared = Number(req.headers.get("content-length") ?? -1);
+        if (declared > MAX_BODY_BYTES) {
+          return Response.json(
+            { jsonrpc: "2.0", error: { code: -32600, message: "Payload too large" }, id: null },
+            { status: 413 },
+          );
+        }
+
         try {
-          const body = await req.json();
+          const buf = await req.arrayBuffer();
+          if (buf.byteLength > MAX_BODY_BYTES) {
+            return Response.json(
+              { jsonrpc: "2.0", error: { code: -32600, message: "Payload too large" }, id: null },
+              { status: 413 },
+            );
+          }
+          let body: unknown;
+          try {
+            body = JSON.parse(new TextDecoder().decode(buf));
+          } catch {
+            return Response.json(
+              { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null },
+              { status: 400 },
+            );
+          }
           const handler = getTransportHandler();
           const result = await handler.handle(body);
 
@@ -90,7 +125,7 @@ export function startServer() {
           return Response.json(
             {
               jsonrpc: "2.0",
-              error: { code: -32603, message: (err as Error).message },
+              error: { code: -32603, message: "Internal error" },
               id: null,
             },
             { status: 500 },
@@ -103,31 +138,48 @@ export function startServer() {
     },
   });
 
-  // Batch dedup job — daily at UTC 03:00
-  // Track last run date to avoid missing if not polled exactly at hour 3
-  let lastDedupDate = "";
+  // Batch dedup job — daily at UTC 03:00.
+  // Uses Postgres advisory lock so only ONE replica runs it even in a
+  // scaled deployment. The process-local lastDedupDate was meaningless
+  // across multiple processes; the lock is the durable guard.
   setInterval(async () => {
     const now = new Date();
-    const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
-    if (now.getUTCHours() >= 3 && lastDedupDate !== todayStr) {
-      lastDedupDate = todayStr;
+    if (now.getUTCHours() < 3) return;
+    await withClusterLock("batch-dedup-daily", async () => {
+      // Extra guard: only run once per UTC day globally. We record the
+      // latest run in a claim/claim-less way — leverage a Postgres
+      // table-less CTE with now() check instead of introducing a new
+      // table. Advisory lock alone allows repeated runs within the
+      // same hour; the >1h `INTERVAL` check keeps us to one per day.
       try {
+        const { db } = await import("../db/connection");
+        const { sql } = await import("drizzle-orm");
+        const r = (await db.execute(sql`
+          SELECT MAX(ingested_at) AS last_run
+          FROM ingest_log
+          WHERE action = 'duplicate'
+            AND reason LIKE 'batch_dedup:%'
+        `)) as unknown as Array<{ last_run: Date | null }>;
+        const last = r[0]?.last_run ? new Date(r[0].last_run).getTime() : 0;
+        if (Date.now() - last < 20 * 3600 * 1000) return;
         const { batchDedup } = await import("../collect/batch-dedup");
         await batchDedup();
       } catch (err) {
         logger.error({ error: (err as Error).message }, "batch dedup failed");
       }
-    }
+    });
   }, 10 * 60 * 1000); // check every 10 minutes
 
   // Retry queue processor — every 5 minutes
   setInterval(async () => {
-    try {
-      const { processRetryQueue } = await import("../collect/retry");
-      await processRetryQueue();
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "retry queue processing failed");
-    }
+    await withClusterLock("retry-queue", async () => {
+      try {
+        const { processRetryQueue } = await import("../collect/retry");
+        await processRetryQueue();
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "retry queue processing failed");
+      }
+    });
   }, 5 * 60 * 1000);
 
   // Reclassify worker — every 90 seconds, batch=3
@@ -135,12 +187,14 @@ export function startServer() {
   // batch classify to fill in domain/tags/decayRate. Covers the case
   // where the original classify LLM call failed during research.
   setInterval(async () => {
-    try {
-      const { processReclassifyQueue } = await import("../collect/reclassify-queue");
-      await processReclassifyQueue(3);
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "reclassify worker failed");
-    }
+    await withClusterLock("reclassify-queue", async () => {
+      try {
+        const { processReclassifyQueue } = await import("../collect/reclassify-queue");
+        await processReclassifyQueue(3);
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "reclassify worker failed");
+      }
+    });
   }, 90 * 1000);
 
   // Claim extraction worker — every 60 seconds, batch=3
@@ -150,22 +204,26 @@ export function startServer() {
   // slower than ingest burst rate — OpenAI/Gemini OAuth free tiers
   // exhaust quickly otherwise.
   setInterval(async () => {
-    try {
-      const { processClaimExtractionQueue } = await import("../claim/extract-queue");
-      await processClaimExtractionQueue(3);
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "claim extraction worker failed");
-    }
+    await withClusterLock("claim-extract", async () => {
+      try {
+        const { processClaimExtractionQueue } = await import("../claim/extract-queue");
+        await processClaimExtractionQueue(3);
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "claim extraction worker failed");
+      }
+    });
   }, 60 * 1000);
 
   // KG triple extraction worker — every 120 seconds, batch=3
   setInterval(async () => {
-    try {
-      const { processKgExtractionQueue } = await import("../kg/extract-queue");
-      await processKgExtractionQueue(3);
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "KG extraction worker failed");
-    }
+    await withClusterLock("kg-extract", async () => {
+      try {
+        const { processKgExtractionQueue } = await import("../kg/extract-queue");
+        await processKgExtractionQueue(3);
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "KG extraction worker failed");
+      }
+    });
   }, 120 * 1000);
 
   // Claim verify queue processor — every 60 seconds, batch=15.
@@ -177,10 +235,11 @@ export function startServer() {
   // forward passes still serialize on the JS thread but they're
   // microseconds compared to the URL-fetch / LLM HTTP waits.
   setInterval(async () => {
-    try {
-      const { processVerifyQueue, updateFactualityScore } = await import("../claim/verify");
-      const processed = await processVerifyQueue(15);
-      if (processed > 0) {
+    await withClusterLock("verify-queue", async () => {
+      try {
+        const { processVerifyQueue, updateFactualityScore } = await import("../claim/verify");
+        const processed = await processVerifyQueue(15);
+        if (processed > 0) {
         // Recompute factuality for entries touched by this batch.
         const { db } = await import("../db/connection");
         const { claim } = await import("../db/schema");
@@ -192,13 +251,14 @@ export function startServer() {
           })
           .from(claim)
           .where(sql`${claim.createdAt} > NOW() - INTERVAL '1 hour'`);
-        for (const r of recent) {
-          await updateFactualityScore(r.entryId, r.entryCreatedAt);
+          for (const r of recent) {
+            await updateFactualityScore(r.entryId, r.entryCreatedAt);
+          }
         }
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "verify queue processing failed");
       }
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "verify queue processing failed");
-    }
+    });
   }, 60 * 1000);
 
   // Calibration worker — every 30 minutes. Sweeps NLI thresholds
@@ -206,12 +266,14 @@ export function startServer() {
   // best (support, refute) cutoffs to calibration_state. Verify
   // workers pick up the new values within ~60s via cache TTL.
   setInterval(async () => {
-    try {
-      const { calibrate } = await import("../claim/calibration");
-      await calibrate();
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "calibration failed");
-    }
+    await withClusterLock("calibration", async () => {
+      try {
+        const { calibrate } = await import("../claim/calibration");
+        await calibrate();
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "calibration failed");
+      }
+    });
   }, 30 * 60 * 1000);
 
   // Drift detector — every 6 hours, batch=5. Re-verifies the oldest
@@ -219,12 +281,14 @@ export function startServer() {
   // under current sources or current model. Runs at low rate so it
   // doesn't crowd out the live verify queue.
   setInterval(async () => {
-    try {
-      const { detectDrift } = await import("../claim/reverify");
-      await detectDrift(5);
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "drift detection failed");
-    }
+    await withClusterLock("drift", async () => {
+      try {
+        const { detectDrift } = await import("../claim/reverify");
+        await detectDrift(5);
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "drift detection failed");
+      }
+    });
   }, 6 * 60 * 60 * 1000);
 
   // Invariant checks — every minute. Publishes Prometheus gauges
@@ -232,12 +296,14 @@ export function startServer() {
   // fire from the metrics, not the code: a non-zero orphan count is
   // the signal. Cheap to run (all SELECT COUNT), safe on hot DB.
   setInterval(async () => {
-    try {
-      const { runInvariantChecks } = await import("../observability/invariants");
-      await runInvariantChecks();
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "invariant checks failed");
-    }
+    await withClusterLock("invariants", async () => {
+      try {
+        const { runInvariantChecks } = await import("../observability/invariants");
+        await runInvariantChecks();
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "invariant checks failed");
+      }
+    });
   }, 60 * 1000);
 
   // Smoke evaluation — every hour. Samples 20 high-consensus
@@ -245,12 +311,14 @@ export function startServer() {
   // divergences. Without a gold set this is our proxy for regression
   // detection: a sudden spike in divergence means something shifted.
   setInterval(async () => {
-    try {
-      const { runSmokeEval } = await import("../claim/smoke-eval");
-      await runSmokeEval();
-    } catch (err) {
-      logger.error({ error: (err as Error).message }, "smoke eval failed");
-    }
+    await withClusterLock("smoke-eval", async () => {
+      try {
+        const { runSmokeEval } = await import("../claim/smoke-eval");
+        await runSmokeEval();
+      } catch (err) {
+        logger.error({ error: (err as Error).message }, "smoke eval failed");
+      }
+    });
   }, 60 * 60 * 1000);
 
   logger.info({ port, host }, "knoldr A2A server started");
@@ -285,7 +353,7 @@ function streamSse(gen: AsyncGenerator<unknown>): Response {
       } catch (err) {
         const payload = {
           jsonrpc: "2.0",
-          error: { code: -32603, message: (err as Error).message },
+          error: { code: -32603, message: "Internal error" },
           id: null,
         };
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));

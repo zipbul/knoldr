@@ -30,10 +30,17 @@ export async function processRetryQueue(): Promise<number> {
           : undefined,
       });
 
-      await ingest(input, { fromRetry: true });
-
-      // Success: remove from queue
+      // Delete-before-ingest: ingest() has its own nested transactions
+      // that commit independently, so wrapping ingest + delete in an
+      // outer TX doesn't actually make them atomic (the inner commits
+      // are already durable before the outer TX commits). Given the
+      // choice between "may lose raw content on crash between delete
+      // and ingest" vs "may double-ingest on crash between ingest and
+      // delete", we pick content loss — double-ingest pollutes the
+      // knowledge base permanently and every retry afterwards hits
+      // the same poison input anyway.
       await db.delete(retryQueue).where(eq(retryQueue.id, item.id));
+      await ingest(input, { fromRetry: true });
       processed++;
       logger.info({ retryId: item.id }, "retry succeeded, removed from queue");
     } catch (err) {
@@ -41,14 +48,31 @@ export async function processRetryQueue(): Promise<number> {
       const backoffMs = 1000 * 60 * Math.pow(5, newAttempts); // 5min, 25min, 125min
       const nextRetry = new Date(Date.now() + backoffMs);
 
+      // We deleted the row optimistically above. On failure, re-insert
+      // with bumped attempts + fresh nextRetry so the retry loop can
+      // try again. If the row is already deleted and we simply UPDATE,
+      // nothing would happen — so we INSERT the row back with the
+      // same id (PK conflicts resolve to no-op since we're the only
+      // writer for that id).
       await db
-        .update(retryQueue)
-        .set({
+        .insert(retryQueue)
+        .values({
+          id: item.id,
+          rawContent: item.rawContent,
+          sourceUrl: item.sourceUrl,
+          errorReason: (err as Error).message,
           attempts: newAttempts,
           nextRetryAt: nextRetry,
-          errorReason: (err as Error).message,
+          createdAt: item.createdAt,
         })
-        .where(eq(retryQueue.id, item.id));
+        .onConflictDoUpdate({
+          target: retryQueue.id,
+          set: {
+            attempts: newAttempts,
+            nextRetryAt: nextRetry,
+            errorReason: (err as Error).message,
+          },
+        });
 
       logger.warn(
         { retryId: item.id, attempts: newAttempts, nextRetry: nextRetry.toISOString() },

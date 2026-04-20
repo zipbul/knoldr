@@ -62,7 +62,9 @@ function runSkill(
     case "find":
       return handleFind(input, progress);
     case "feedback":
-      return handleFeedback(input) as Promise<unknown>;
+      // handleFeedback already returns Promise<FeedbackResult>, which
+      // is assignable to Promise<unknown>. No cast needed.
+      return handleFeedback(input);
   }
 }
 
@@ -91,20 +93,31 @@ export class KnoldrExecutor implements AgentExecutor {
       logger.info({ skill, taskId }, "executing A2A skill");
       progress.emit("started", { skill });
 
-      runSkill(skill as SupportedSkill, input, progress)
-        .then((result) => {
-          eventBus.publish(makeMessage(result as Record<string, unknown>));
-          eventBus.finished();
-        })
-        .catch((err) => {
-          eventBus.publish(makeMessage({ error: { code: -32603, message: (err as Error).message } }));
-          eventBus.finished();
-        });
+      // AWAIT the skill before returning from execute(). The prior
+      // fire-and-forget shape relied on the SDK holding the eventBus
+      // open after execute() resolved; any SDK change that tears the
+      // bus down at resolution boundary would drop the final message.
+      try {
+        const result = await runSkill(skill as SupportedSkill, input, progress);
+        eventBus.publish(makeMessage(result as Record<string, unknown>));
+      } catch (err) {
+        logger.error(
+          { taskId, skill, error: (err as Error).message },
+          "skill execution failed",
+        );
+        // Don't echo the raw error message to the caller — it can carry
+        // SQL text, stack fragments, or dependency internals. The log
+        // above preserves the detail for operators.
+        eventBus.publish(
+          makeMessage({ error: { code: -32603, message: "Internal error" } }),
+        );
+      }
+      eventBus.finished();
     } catch (err) {
       const error = err as Error;
       logger.error({ taskId, error: error.message }, "A2A skill execution failed");
       eventBus.publish(
-        makeMessage({ error: { code: -32603, message: error.message } }),
+        makeMessage({ error: { code: -32603, message: "Internal error" } }),
       );
       eventBus.finished();
     }

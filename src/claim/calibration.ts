@@ -39,6 +39,11 @@ interface CalibrationResult {
  * contradiction or LLM jury) committed the same verdict. Those rows
  * are our pseudo-gold for threshold tuning.
  */
+// Hard cap on samples so a growing DB doesn't blow up the calibration
+// worker runtime. 5k rows is more than enough signal for the 9-point
+// threshold sweep and bounds execution time to well under a second.
+const MAX_CALIBRATION_SAMPLES = 5000;
+
 async function collectSamples(): Promise<CalibrationSample[]> {
   const rows = (await db.execute(sql`
     SELECT
@@ -49,6 +54,8 @@ async function collectSamples(): Promise<CalibrationSample[]> {
     WHERE evidence->>'source' = 'source_check'
       AND verdict IN ('verified','disputed')
       AND evidence->'sourceChecks'->0->'scores' IS NOT NULL
+    ORDER BY created_at DESC
+    LIMIT ${MAX_CALIBRATION_SAMPLES}
   `)) as unknown as CalibrationSample[];
   return rows.filter(
     (r) =>

@@ -6,7 +6,9 @@ process.env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://loc
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
+process.env.KNOLDR_ENABLE_CLOUD_CLI = "1";
 process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
+process.env.KNOLDR_CLOUD_CODEX_MODEL = "mock";
 process.env.OLLAMA_HOST = "http://127.0.0.1:1";
 process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
 

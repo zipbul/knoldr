@@ -13,10 +13,13 @@ process.env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://loc
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
+// Cloud-CLI path is opt-in at runtime now. Enable it for this test
+// so the mock Codex binary actually gets invoked. Also block the
+// Ollama primary path so mock Codex is the only route — without
+// this, a live Ollama on the host runs the real pipeline instead.
+process.env.KNOLDR_ENABLE_CLOUD_CLI = "1";
 process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
-// Block the Ollama primary path so the mock Codex CLI is actually
-// exercised; without this, a live Ollama on the host runs instead
-// and the tests exercise a pipeline the CI environment can't control.
+process.env.KNOLDR_CLOUD_CODEX_MODEL = "mock";
 process.env.OLLAMA_HOST = "http://127.0.0.1:1";
 process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
 

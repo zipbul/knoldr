@@ -7,10 +7,13 @@ process.env.TEST_DATABASE_URL =
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
+process.env.KNOLDR_ENABLE_CLOUD_CLI = "1";
 process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
-// Gemini CLI is a real spawn; forcing /bin/false keeps fallback path
-// quick and deterministic for anything the mock codex does not handle.
-process.env.KNOLDR_GEMINI_CLI = "false";
+process.env.KNOLDR_CLOUD_CODEX_MODEL = "mock";
+// Gemini CLI is a real spawn; leave it unset so cloudConfigs()
+// includes only the mock codex entry.
+process.env.KNOLDR_GEMINI_CLI = "";
+process.env.KNOLDR_CLOUD_GEMINI_MODEL = "";
 process.env.OLLAMA_HOST = "http://127.0.0.1:1";
 process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
 process.env.KNOLDR_PORT = "19960";

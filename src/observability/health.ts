@@ -1,39 +1,35 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/connection";
 
-// Cache CLI existence checks: the binaries don't appear / disappear
-// between runs, and `Bun.spawnSync(["which", ...])` on every /health
-// hit adds two fork()s per docker healthcheck tick. Re-check once a
-// minute, which is plenty for human-debug accuracy.
-interface CliCache {
-  codex: boolean;
-  gemini: boolean;
+// Ollama reachability cache: Bun's fetch has no DNS cache, so a
+// /health that hits host.docker.internal:11434 on every probe adds
+// latency that stacks up on docker healthcheck cadence. Re-check
+// once per minute — plenty for human-debug accuracy.
+interface LlmCache {
+  ok: boolean;
   at: number;
 }
-let cliCache: CliCache | null = null;
-const CLI_TTL_MS = 60_000;
+let llmCache: LlmCache | null = null;
+const LLM_TTL_MS = 60_000;
 
-function checkCli(name: string): boolean {
+async function probeOllama(): Promise<boolean> {
+  const host = process.env.OLLAMA_HOST ?? "http://localhost:11434";
   try {
-    return Bun.spawnSync(["which", name]).exitCode === 0;
+    const res = await fetch(`${host}/api/tags`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
   } catch {
     return false;
   }
 }
 
-function getCliStatus(): { codex: boolean; gemini: boolean } {
+async function getLlmStatus(): Promise<boolean> {
   const now = Date.now();
-  if (cliCache && now - cliCache.at < CLI_TTL_MS) {
-    return { codex: cliCache.codex, gemini: cliCache.gemini };
-  }
-  const codexCli = process.env.KNOLDR_CODEX_CLI ?? "codex";
-  const geminiCli = process.env.KNOLDR_GEMINI_CLI ?? "gemini";
-  cliCache = {
-    codex: checkCli(codexCli),
-    gemini: checkCli(geminiCli),
-    at: now,
-  };
-  return { codex: cliCache.codex, gemini: cliCache.gemini };
+  if (llmCache && now - llmCache.at < LLM_TTL_MS) return llmCache.ok;
+  const ok = await probeOllama();
+  llmCache = { ok, at: now };
+  return ok;
 }
 
 export async function getHealthStatus() {
@@ -51,12 +47,11 @@ export async function getHealthStatus() {
     dbStatus = "down";
   }
 
-  const cli = getCliStatus();
-  const llmApiStatus = cli.codex || cli.gemini ? "up" : "down";
+  const llmOk = await getLlmStatus();
 
   return {
     db: dbStatus,
-    llmApi: llmApiStatus,
+    llm: llmOk ? "up" : "down",
     embedding: "local",
     uptime: process.uptime(),
     latencyMs: Date.now() - startTime,

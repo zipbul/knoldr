@@ -7,6 +7,8 @@ process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
 process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
+process.env.OLLAMA_HOST = "http://127.0.0.1:1";
+process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
 
 let processFeedback: typeof import("../../src/score/feedback").processFeedback;
 let RateLimitError: typeof import("../../src/score/feedback").RateLimitError;
@@ -62,7 +64,7 @@ async function createTestEntry() {
     sources: [{ url: "https://docs.example.com", sourceType: "official_docs" }],
   });
   const results = await ingest(input);
-  if (results[0]!.action !== "stored") {
+  if (results[0]!.action !== "stored" || !results[0]!.entryId) {
     throw new Error(`createTestEntry failed: action=${results[0]!.action}`);
   }
   return results[0]!.entryId;

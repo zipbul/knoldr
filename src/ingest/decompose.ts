@@ -61,20 +61,53 @@ export async function decompose(rawText: string): Promise<DecomposeResponse> {
 
 /**
  * Sanitize LLM output before zod validation.
- * LLMs frequently generate tags/domains with underscores, spaces, or special chars.
+ *
+ * Handles two common misbehaviors from smaller local models:
+ *  1. Returns a single entry object at the root instead of wrapping
+ *     it in {"entries": [...]} — Ollama's format:"json" guarantees
+ *     valid JSON but not schema shape.
+ *  2. Returns tags/domains with underscores, spaces, or punctuation
+ *     that our slug rules reject.
  */
 function sanitizeLlmOutput(raw: unknown): unknown {
   if (!raw || typeof raw !== "object") return raw;
-  const obj = raw as Record<string, unknown>;
-  if (!Array.isArray(obj.entries)) return raw;
+  let obj = raw as Record<string, unknown>;
+
+  // Recover from "root is a single entry" by wrapping.
+  if (!Array.isArray(obj.entries)) {
+    const looksLikeEntry =
+      typeof obj.title === "string" || typeof obj.content === "string";
+    if (looksLikeEntry) {
+      obj = { entries: [obj] };
+    } else if (Array.isArray((obj as { data?: unknown }).data)) {
+      // Some models return {"data":[...]} or {"results":[...]}
+      obj = { entries: (obj as { data: unknown[] }).data };
+    } else if (Array.isArray((obj as { results?: unknown }).results)) {
+      obj = { entries: (obj as { results: unknown[] }).results };
+    } else {
+      return raw;
+    }
+  }
 
   obj.entries = (obj.entries as Record<string, unknown>[]).slice(0, 20).map((entry) => {
     if (Array.isArray(entry.domain)) {
       entry.domain = entry.domain.map(normalizeSlug).filter(Boolean).slice(0, 5);
+    } else if (typeof entry.domain === "string") {
+      entry.domain = [normalizeSlug(entry.domain)].filter(Boolean);
+    } else {
+      entry.domain = [];
     }
     if (Array.isArray(entry.tags)) {
       entry.tags = entry.tags.map(normalizeSlug).filter(Boolean).slice(0, 20);
+    } else if (typeof entry.tags === "string") {
+      entry.tags = [normalizeSlug(entry.tags)].filter(Boolean);
+    } else {
+      entry.tags = [];
     }
+    // decayRate sometimes comes back as string or missing.
+    const dr = entry.decayRate;
+    if (typeof dr === "string") entry.decayRate = parseFloat(dr) || 0.01;
+    else if (typeof dr !== "number") entry.decayRate = 0.01;
     return entry;
   });
 

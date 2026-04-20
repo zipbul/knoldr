@@ -92,7 +92,7 @@ async function searchArxiv(query: string): Promise<RetrievalHit[]> {
   const ctrl = AbortSignal.timeout(FETCH_TIMEOUT_MS);
   // arXiv API returns Atom XML — small response, easy to parse with
   // regex for our needs (title + summary + abs URL).
-  const url = `http://export.arxiv.org/api/query?${new URLSearchParams({
+  const url = `https://export.arxiv.org/api/query?${new URLSearchParams({
     search_query: `all:${query.slice(0, 200)}`,
     start: "0",
     max_results: "3",

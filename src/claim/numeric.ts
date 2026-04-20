@@ -18,7 +18,7 @@ interface NumericFact {
 }
 
 const PATTERNS: Array<{ kind: NumericFact["kind"]; re: RegExp; canon: (m: RegExpMatchArray) => string }> = [
-  { kind: "year", re: /\b(19[5-9]\d|20[0-4]\d)\b/g, canon: (m) => m[0]! },
+  { kind: "year", re: /\b(19\d{2}|20\d{2}|21\d{2})\b/g, canon: (m) => m[0]! },
   { kind: "version", re: /\bv?(\d+\.\d+(?:\.\d+)?)\b/g, canon: (m) => m[1]! },
   { kind: "percentage", re: /\b(\d+(?:\.\d+)?)\s?%/g, canon: (m) => `${m[1]}%` },
   // Scale matters for the MiniCheck-style false positive: 770M ≠ 7B

@@ -1,11 +1,15 @@
 import { describe, expect, test, beforeAll } from "bun:test";
 import { decomposeQuery } from "../../src/collect/query-decompose";
 
-// Force both CLIs to fail so fallbackQueries() is exercised.
-// `false` is a POSIX command that always exits non-zero.
+// Force ALL LLM paths to fail so fallbackQueries() is exercised.
+// `false` is a POSIX command that always exits non-zero; Ollama is
+// now primary (role-separated /api/chat) so we must also point its
+// host at an unreachable address for the fallback path to trigger.
 beforeAll(() => {
   process.env.KNOLDR_CODEX_CLI = "false";
   process.env.KNOLDR_GEMINI_CLI = "false";
+  process.env.OLLAMA_HOST = "http://127.0.0.1:1";
+  process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
 });
 
 describe("Query Decompose", () => {

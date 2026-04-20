@@ -17,8 +17,15 @@ import {
 } from "./validate";
 import { logger } from "../observability/logger";
 
+/**
+ * Result of one ingest attempt. `entryId` is null for rejected rows
+ * (previous code used an empty string `""` which then blew up
+ * downstream: `decodeUlidTimestamp("")` throws, feedback handler
+ * 500s, metrics labels get polluted). Callers iterating results must
+ * check `action` before using `entryId`.
+ */
 export interface IngestResult {
-  entryId: string;
+  entryId: string | null;
   authority: number;
   decayRate: number;
   action: "stored" | "duplicate" | "rejected";
@@ -41,6 +48,20 @@ export async function ingest(
   opts: { fromRetry?: boolean } = {},
 ): Promise<IngestResult[]> {
   const timer = ingestionLatency.startTimer();
+  try {
+    return await ingestInner(input, opts);
+  } finally {
+    // Guarantee the histogram records every code path (including early
+    // rejects and thrown errors) so ingestion latency is never silently
+    // missing for failure modes.
+    timer();
+  }
+}
+
+async function ingestInner(
+  input: StoreInput,
+  opts: { fromRetry?: boolean },
+): Promise<IngestResult[]> {
   const sources: Source[] = input.sources ?? [];
   const results: IngestResult[] = [];
 
@@ -56,12 +77,18 @@ export async function ingest(
       const errorMsg = (err as Error).message;
       logger.error({ error: errorMsg, fromRetry: !!opts.fromRetry }, "decompose failed");
 
-      // Log as rejected
-      await db.insert(ingestLog).values({
-        id: ulid(),
-        action: "rejected",
-        reason: `decompose_failed: ${errorMsg}`,
-      });
+      // Single ingest_log row per terminal decompose failure, regardless
+      // of how many times retry re-enters. The retry loop itself tracks
+      // attempts in retry_queue; doubling the audit trail here just
+      // inflates ingest_log with identical reason strings (saw the same
+      // decompose_failed row 2375× in production logs).
+      if (!opts.fromRetry) {
+        await db.insert(ingestLog).values({
+          id: ulid(),
+          action: "rejected",
+          reason: `decompose_failed: ${errorMsg}`,
+        });
+      }
 
       // Re-throw when called from retry loop so the caller bumps
       // attempts on the existing queue entry rather than spawning a
@@ -75,7 +102,18 @@ export async function ingest(
         `decompose_parse_error: ${errorMsg}`,
       );
 
-      return [{ entryId: "", authority: 0, decayRate: 0, action: "rejected", reason: errorMsg }];
+      ingestionTotal.inc({ action: "rejected" });
+      // Keep the rejected record visible to callers (research.ts
+      // counts it, CLI prints it) — but with `entryId: null` so no
+      // downstream code can mistake it for a real partition-routable
+      // ULID.
+      return [{
+        entryId: null,
+        authority: 0,
+        decayRate: 0,
+        action: "rejected",
+        reason: errorMsg,
+      }];
     }
 
     // Handle empty entries (LLM returned nothing useful)
@@ -85,7 +123,14 @@ export async function ingest(
         action: "rejected",
         reason: "no_entries_extracted",
       });
-      return [{ entryId: "", authority: 0, decayRate: 0, action: "rejected", reason: "no_entries_extracted" }];
+      ingestionTotal.inc({ action: "rejected" });
+      return [{
+        entryId: null,
+        authority: 0,
+        decayRate: 0,
+        action: "rejected",
+        reason: "no_entries_extracted",
+      }];
     }
   } else {
     // Mode 2: structured → skip decompose
@@ -101,12 +146,30 @@ export async function ingest(
     } catch (err) {
       const errorMsg = (err as Error).message;
       logger.error({ error: errorMsg, title: decomposed.title }, "entry processing failed");
-      results.push({ entryId: "", authority: 0, decayRate: 0, action: "rejected", reason: errorMsg });
+      try {
+        await db.insert(ingestLog).values({
+          id: ulid(),
+          action: "rejected",
+          reason: `process_entry_failed: ${errorMsg.slice(0, 500)}`,
+        });
+      } catch (logErr) {
+        logger.warn({ error: (logErr as Error).message }, "failed to record ingest_log");
+      }
+      // Push a rejected result with entryId=null so the caller's count
+      // stays accurate but no downstream code treats the null id as a
+      // valid entry.
+      results.push({
+        entryId: null,
+        authority: 0,
+        decayRate: 0,
+        action: "rejected",
+        reason: errorMsg,
+      });
+      ingestionTotal.inc({ action: "rejected" });
     }
   }
 
-  // Record metrics
-  timer();
+  // Record metrics for the per-entry successes
   for (const r of results) {
     ingestionTotal.inc({ action: r.action });
   }

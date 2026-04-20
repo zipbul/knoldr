@@ -51,7 +51,10 @@ export interface CounterEvidence {
 export async function counterSearch(claim: string): Promise<CounterEvidence | null> {
   let query: string;
   try {
-    const out = await callLlm(`${COUNTER_QUERY_PROMPT}\n\n${claim.slice(0, 500)}`);
+    const out = await callLlm({
+      system: COUNTER_QUERY_PROMPT,
+      user: claim.slice(0, 500),
+    });
     query = counterSchema.parse(extractJson(out)).query;
   } catch (err) {
     logger.debug({ error: (err as Error).message }, "counter-query generation failed");

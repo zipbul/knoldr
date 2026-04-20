@@ -31,13 +31,20 @@ export async function runSmokeEval(): Promise<{
 }> {
   // Pull high-consensus anchors: verdict committed by source_check
   // with certainty >= 0.8 (any source authority already baked in).
+  //
+  // Sampling strategy: `ORDER BY random() LIMIT N` triggers a full
+  // sort on the candidate set and scales linearly with table growth.
+  // Instead, filter to a recent window and apply a hash-based sample
+  // using tableoid + ctid so each run picks a different but bounded
+  // subset without sorting the whole table.
   const anchors = (await db.execute(sql`
     SELECT id, verdict, certainty, evidence->>'source' AS source
     FROM claim
     WHERE verdict IN ('verified', 'disputed')
       AND certainty >= 0.8
       AND evidence->>'source' = 'source_check'
-    ORDER BY random()
+      AND created_at > NOW() - INTERVAL '30 days'
+      AND abs(hashtext(id || to_char(now(), 'YYYY-MM-DD HH24'))) % 20 = 0
     LIMIT ${SAMPLE_SIZE}
   `)) as unknown as SampleRow[];
 

@@ -62,11 +62,12 @@ export const entry = pgTable(
     check("entry_decay_rate_range", sql`${t.decayRate} >= 0 AND ${t.decayRate} <= 1`),
     check("entry_status_values", sql`${t.status} IN ('draft', 'active')`),
     check("entry_metadata_size", sql`pg_column_size(${t.metadata}) <= 1048576`),
-    // pgroonga FTS index — created via raw SQL in migration (drizzle doesn't support pgroonga)
+    // pgroonga FTS index + HNSW embedding index — created via raw SQL in
+    // migration (drizzle doesn't support pgroonga / hnsw opclasses).
     index("idx_entry_status").on(t.status),
-    index("idx_entry_authority").on(t.authority),
+    index("idx_entry_authority").on(t.authority.desc()),
     index("idx_entry_language").on(t.language),
-    index("idx_entry_created_at").on(t.createdAt),
+    index("idx_entry_created_at").on(t.createdAt.desc()),
   ],
 );
 
@@ -154,7 +155,7 @@ export const ingestLog = pgTable(
     uniqueIndex("idx_ingest_log_url_hash")
       .on(t.urlHash)
       .where(sql`${t.urlHash} IS NOT NULL`),
-    index("idx_ingest_log_ingested_at").on(t.ingestedAt),
+    index("idx_ingest_log_ingested_at").on(t.ingestedAt.desc()),
   ],
 );
 
@@ -178,8 +179,8 @@ export const feedbackLog = pgTable(
       foreignColumns: [entry.id, entry.createdAt],
     }).onDelete("cascade"),
     check("feedback_log_signal_values", sql`${t.signal} IN ('positive', 'negative')`),
-    index("idx_feedback_log_entry").on(t.entryId, t.createdAt),
-    index("idx_feedback_log_agent_entry").on(t.agentId, t.entryId, t.createdAt),
+    index("idx_feedback_log_entry").on(t.entryId, t.createdAt.desc()),
+    index("idx_feedback_log_agent_entry").on(t.agentId, t.entryId, t.createdAt.desc()),
   ],
 );
 
@@ -225,6 +226,7 @@ export const claim = pgTable(
     evidence: jsonb("evidence"),
     embedding: vector("embedding").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastDriftCheckAt: timestamp("last_drift_check_at", { withTimezone: true }),
   },
   (t) => [
     foreignKey({
@@ -267,7 +269,7 @@ export const verifyQueue = pgTable(
       foreignColumns: [claim.id],
     }).onDelete("cascade"),
     index("idx_verify_queue_next")
-      .on(t.priority, t.nextAttemptAt)
+      .on(t.priority.desc(), t.nextAttemptAt)
       .where(sql`${t.attempts} < 3`),
   ],
 );
@@ -294,7 +296,10 @@ export const entity = pgTable(
     check("entity_type_len", sql`length(${t.type}) <= 50`),
     index("idx_entity_name").on(t.name),
     index("idx_entity_type").on(t.type),
-    // pgvector hnsw index created via raw SQL in migration.
+    // Case-insensitive UNIQUE on (type, name) — prevents race-condition
+    // duplicates when two workers upsert the same entity concurrently.
+    // Functional index on lower(name); created via raw SQL in migration
+    // because drizzle doesn't support expression indexes here.
   ],
 );
 

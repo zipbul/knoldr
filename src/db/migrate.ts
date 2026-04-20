@@ -50,6 +50,10 @@ async function migrate() {
   await sql`CREATE INDEX IF NOT EXISTS idx_entry_authority ON entry(authority DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_entry_language ON entry(language)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_entry_created_at ON entry(created_at DESC)`;
+  // HNSW on embedding — without this, dedup and cross-ref run Seq Scan on
+  // every ingest and every smoke-eval cycle. Required for O(log N)
+  // approximate-nearest-neighbor search.
+  await sql`CREATE INDEX IF NOT EXISTS idx_entry_embedding ON entry USING hnsw(embedding vector_cosine_ops)`;
 
   // ============================================================
   // entry_domain
@@ -172,6 +176,10 @@ async function migrate() {
   await sql`CREATE INDEX IF NOT EXISTS idx_claim_entry ON claim(entry_id, entry_created_at)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_claim_type_verdict ON claim(type, verdict)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_claim_embedding ON claim USING hnsw(embedding vector_cosine_ops)`;
+  // Drift checker uses this to avoid re-picking the same 5 oldest
+  // claims every cycle when they consistently fail to re-verify.
+  await sql`ALTER TABLE claim ADD COLUMN IF NOT EXISTS last_drift_check_at TIMESTAMPTZ`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_claim_drift ON claim(last_drift_check_at NULLS FIRST) WHERE verdict IN ('verified', 'disputed')`;
 
   // ============================================================
   // verify_queue (v0.3)
@@ -181,10 +189,40 @@ async function migrate() {
       claim_id TEXT PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
       queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       priority INTEGER NOT NULL DEFAULT 0,
-      attempts INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0 AND attempts <= 3),
       next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  // CHECK clamps attempts at 3 so bumpAttempt can't runaway past the
+  // WHERE-filter cutoff. Any pre-existing rows beyond 3 get the verdict
+  // committed + dequeued by the sweep below.
+  await sql`DO $$ BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'verify_queue_attempts_check'
+    ) THEN
+      BEGIN
+        ALTER TABLE verify_queue ADD CONSTRAINT verify_queue_attempts_check
+          CHECK (attempts >= 0 AND attempts <= 3);
+      EXCEPTION WHEN check_violation THEN
+        -- Pre-existing data violates; caller should run the sweep then retry.
+        NULL;
+      END;
+    END IF;
+  END $$`;
+  // One-time sweep: anything past attempts=3 is committed as unverified
+  // + dropped from the queue so legacy poison rows don't linger.
+  await sql`
+    WITH stuck AS (
+      SELECT claim_id FROM verify_queue WHERE attempts > 3
+    )
+    UPDATE claim SET verdict = 'unverified', certainty = 0,
+      evidence = COALESCE(evidence, '{}'::jsonb)
+        || jsonb_build_object('source', 'llm_jury', 'rationale', 'legacy stuck row swept')
+    WHERE id IN (SELECT claim_id FROM stuck)
+      AND verdict = 'unverified'
+  `;
+  await sql`DELETE FROM verify_queue WHERE attempts > 3`;
   await sql`CREATE INDEX IF NOT EXISTS idx_verify_queue_next ON verify_queue(priority DESC, next_attempt_at) WHERE attempts < 3`;
 
   // ============================================================
@@ -222,6 +260,11 @@ async function migrate() {
   await sql`CREATE INDEX IF NOT EXISTS idx_entity_name ON entity(name)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_entity_type ON entity(type)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_entity_embedding ON entity USING hnsw(embedding vector_cosine_ops)`;
+  // Case-insensitive UNIQUE on (type, lower(name)) — DB-level guard
+  // against race-condition duplicates from upsertEntity.
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS uniq_entity_type_name_ci ON entity(type, lower(name))`;
+  // Expression index used by isFunctionalPredicate / findConflictingObjects.
+  await sql`CREATE INDEX IF NOT EXISTS idx_entity_name_lower ON entity(lower(name))`;
 
   // ============================================================
   // kg_relation (v0.4) — Knowledge Graph edges
@@ -241,6 +284,9 @@ async function migrate() {
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_source ON kg_relation(source_entity_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_target ON kg_relation(target_entity_id)`;
+  // Used by isFunctionalPredicate / findConflictingObjects — without it
+  // every contradiction check Seq Scans the full edge table.
+  await sql`CREATE INDEX IF NOT EXISTS idx_kg_relation_type ON kg_relation(relation_type)`;
 
   // No human-review queue. The verifier auto-escalates uncertain
   // cases through CoVe + web_search + specialized retrieval and

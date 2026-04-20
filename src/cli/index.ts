@@ -127,7 +127,8 @@ async function handleStore(args: string[]) {
   } else {
     for (const r of results) {
       const icon = r.action === "stored" ? "+" : r.action === "duplicate" ? "=" : "x";
-      console.log(`[${icon}] ${r.entryId}  authority=${r.authority.toFixed(2)}  decay=${r.decayRate}  action=${r.action}`);
+      const idPart = r.entryId ?? `(no id — ${r.reason ?? "rejected"})`;
+      console.log(`[${icon}] ${idPart}  authority=${r.authority.toFixed(2)}  decay=${r.decayRate}  action=${r.action}`);
     }
   }
 }
@@ -358,8 +359,11 @@ async function handleAudit(args: string[]) {
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
-  for await (const chunk of Bun.stdin.stream()) {
-    chunks.push(Buffer.from(chunk));
+  const reader = (Bun.stdin.stream() as ReadableStream<Uint8Array>).getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(Buffer.from(value));
   }
   return Buffer.concat(chunks).toString("utf-8");
 }

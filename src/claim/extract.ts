@@ -67,13 +67,21 @@ export async function extractClaims(
   const seen = new Map<string, ExtractedClaim>();
   for (const w of windows) {
     if (seen.size >= GLOBAL_MAX_CLAIMS) break;
-    const prompt = `${SYSTEM_PROMPT}\n\n${w}`;
     try {
-      const output = await callLlm(prompt);
+      const output = await callLlm({ system: SYSTEM_PROMPT, user: w });
       const raw = extractJson(output);
       const parsed = claimSchema.parse(raw);
       for (const c of parsed.claims) {
-        const key = c.statement.toLowerCase().replace(/\s+/g, " ").trim();
+        // Normalize aggressively before dedup so "Bun is fast", "Bun
+        // is fast.", and "Bun is fast!" collapse to a single key.
+        // Previously each punctuation variant slipped through and we
+        // stored 3× the same assertion.
+        const key = c.statement
+          .toLowerCase()
+          .normalize("NFKC")
+          .replace(/[\p{P}\p{S}]+/gu, " ")
+          .replace(/\s+/g, " ")
+          .trim();
         if (key.length < 8) continue;
         if (!seen.has(key)) seen.set(key, c);
         if (seen.size >= GLOBAL_MAX_CLAIMS) break;

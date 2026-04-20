@@ -38,27 +38,42 @@ export function fingerprint(url: string, title: string, text: string): SourceFin
 /**
  * Group fingerprints into independence buckets. Two fingerprints
  * collapse if any of: same domain, same normalized title, hamming
- * distance < 4 on simhash. Returns the count of independent buckets.
+ * distance < 4 on simhash. Uses union-find so similarity is
+ * transitive — A~B and B~C imply A~C even when A and C aren't
+ * directly similar (catches three-way cascades of Reuters reposts
+ * that the per-group-head comparison dropped into separate buckets).
  */
 export function independentCount(fps: SourceFingerprint[]): number {
-  const groups: SourceFingerprint[][] = [];
-  for (const fp of fps) {
-    let placed = false;
-    for (const g of groups) {
-      const head = g[0]!;
+  if (fps.length === 0) return 0;
+  const parent = fps.map((_, i) => i);
+  const find = (x: number): number => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]!]!;
+      x = parent[x]!;
+    }
+    return x;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+  for (let i = 0; i < fps.length; i++) {
+    for (let j = i + 1; j < fps.length; j++) {
+      const fi = fps[i]!;
+      const fj = fps[j]!;
       if (
-        head.domain === fp.domain ||
-        (head.titleNorm.length > 4 && head.titleNorm === fp.titleNorm) ||
-        hamming(head.simhash, fp.simhash) < 4
+        (fi.domain && fi.domain === fj.domain) ||
+        (fi.titleNorm.length > 4 && fi.titleNorm === fj.titleNorm) ||
+        hamming(fi.simhash, fj.simhash) < 4
       ) {
-        g.push(fp);
-        placed = true;
-        break;
+        union(i, j);
       }
     }
-    if (!placed) groups.push([fp]);
   }
-  return groups.length;
+  const roots = new Set<number>();
+  for (let i = 0; i < fps.length; i++) roots.add(find(i));
+  return roots.size;
 }
 
 function normalize(s: string): string {

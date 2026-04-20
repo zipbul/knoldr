@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { processFeedback, RateLimitError } from "../../score/feedback";
+import { InvalidUlidError } from "../../lib/ulid-utils";
 import { logger } from "../../observability/logger";
 
 const feedbackInputSchema = z.object({
@@ -37,6 +38,9 @@ export async function handleFeedback(input: Record<string, unknown>): Promise<Fe
   } catch (err) {
     if (err instanceof RateLimitError) {
       return { ok: false, error: "rate_limited", message: err.message };
+    }
+    if (err instanceof InvalidUlidError) {
+      return { ok: false, error: "invalid_input", message: err.message };
     }
     const message = (err as Error).message;
     if (message.startsWith("Entry not found")) {

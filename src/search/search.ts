@@ -13,108 +13,96 @@ export interface SearchResult {
   nextCursor?: string;
 }
 
+// Keyset pagination: the cursor carries the last row's ranking score
+// plus its id. The next page SELECTs rows whose (score, id) is strictly
+// less than the cursor. This is O(log N) per page regardless of depth,
+// unlike the previous over-fetch-50-then-slice approach which capped
+// the reachable depth at exactly 50.
+interface Cursor {
+  score: number;
+  id: string;
+}
+
+const MAX_LIMIT = 50;
+// Per-page candidate pool. Larger than requested limit so authority +
+// freshness re-ranking still sees enough candidates to reorder
+// meaningfully without capping pagination depth — the `cursor` alone
+// drives where we read from.
+const CANDIDATE_MULTIPLIER = 3;
+
 /**
  * Keyword search with pgroonga FTS, filters, freshness decay, authority ranking.
  */
 export async function search(input: QueryInput): Promise<SearchResult> {
   const timer = searchLatency.startTimer();
   searchTotal.inc();
-  const conditions: SQL[] = [eq(entry.status, "active")];
+  try {
+    const conditions: SQL[] = [eq(entry.status, "active")];
 
-  if (input.minAuthority !== undefined) {
-    conditions.push(gte(entry.authority, input.minAuthority));
-  }
-  if (input.language) {
-    conditions.push(eq(entry.language, input.language));
-  }
-  if (input.minTrustLevel) {
-    conditions.push(gte(entry.authority, trustLevelToMinAuthority(input.minTrustLevel)));
-  }
-
-  // pgroonga FTS — convert query words to OR matching for better recall
-  // AI agents send precise queries, but AND matching is too strict when
-  // entries are atomically decomposed (each covers one aspect).
-  // Term-coverage filtering is applied post-rank (see below) so that weak
-  // single-incidental-term matches don't pass as valid results.
-  const queryTerms = input.query.trim().split(/\s+/).filter((t) => t.length > 0);
-  const orQuery = queryTerms.join(" OR ");
-  conditions.push(
-    sql`(${entry.title} &@~ ${orQuery} OR ${entry.content} &@~ ${orQuery})`,
-  );
-
-  // Domain filter
-  if (input.domain) {
-    conditions.push(
-      sql`EXISTS (SELECT 1 FROM entry_domain ed WHERE ed.entry_id = ${entry.id} AND ed.entry_created_at = ${entry.createdAt} AND ed.domain = ${input.domain})`,
-    );
-  }
-
-  // Tag filter
-  if (input.tags && input.tags.length > 0) {
-    conditions.push(
-      sql`EXISTS (SELECT 1 FROM entry_tag et WHERE et.entry_id = ${entry.id} AND et.entry_created_at = ${entry.createdAt} AND et.tag = ANY(${input.tags}))`,
-    );
-  }
-
-  // Fetch top 50 candidates (over-fetch for re-ranking, then cut to limit)
-  const fetchLimit = 50;
-
-  const rows = await db
-    .select({
-      id: entry.id,
-      title: entry.title,
-      content: entry.content,
-      language: entry.language,
-      metadata: entry.metadata,
-      authority: entry.authority,
-      decayRate: entry.decayRate,
-      status: entry.status,
-      createdAt: entry.createdAt,
-      pgroongaScore: sql<number>`pgroonga_score(tableoid, ctid)`,
-    })
-    .from(entry)
-    .where(and(...conditions))
-    .orderBy(sql`pgroonga_score(tableoid, ctid) DESC`)
-    .limit(fetchLimit);
-
-  // Enrich with domains, tags, sources
-  const enriched = await enrichRows(rows);
-
-  // Rank by final score (and compute termCoverage against the query)
-  const ranked = rank(enriched, "query", queryTerms);
-
-  // Apply cursor + limit
-  const limit = Math.min(input.limit, 50);
-  let startIdx = 0;
-  if (input.cursor) {
-    const decoded = decodeCursor(input.cursor);
-    if (decoded) {
-      startIdx = ranked.entries.findIndex(
-        (e, i) =>
-          ranked.scores[i]!.final < decoded.score ||
-          (ranked.scores[i]!.final === decoded.score && e.id < decoded.id),
-      );
-      if (startIdx === -1) startIdx = ranked.entries.length;
+    if (input.minAuthority !== undefined) {
+      conditions.push(gte(entry.authority, input.minAuthority));
     }
+    if (input.language) {
+      conditions.push(eq(entry.language, input.language));
+    }
+    if (input.minTrustLevel) {
+      conditions.push(gte(entry.authority, trustLevelToMinAuthority(input.minTrustLevel)));
+    }
+
+    // pgroonga FTS — escape special chars then OR-join so a raw apostrophe /
+    // brace / pipe in the user query can't corrupt pgroonga's grammar.
+    const queryTerms = input.query.trim().split(/\s+/).filter((t) => t.length > 0);
+    const escaped = queryTerms.map(escapePgroongaTerm);
+    const orQuery = escaped.length > 0 ? escaped.join(" OR ") : escaped[0] ?? "";
+    conditions.push(
+      sql`(${entry.title} &@~ ${orQuery} OR ${entry.content} &@~ ${orQuery})`,
+    );
+
+    // Domain filter
+    if (input.domain) {
+      conditions.push(
+        sql`EXISTS (SELECT 1 FROM entry_domain ed WHERE ed.entry_id = ${entry.id} AND ed.entry_created_at = ${entry.createdAt} AND ed.domain = ${input.domain})`,
+      );
+    }
+
+    // Tag filter
+    if (input.tags && input.tags.length > 0) {
+      conditions.push(
+        sql`EXISTS (SELECT 1 FROM entry_tag et WHERE et.entry_id = ${entry.id} AND et.entry_created_at = ${entry.createdAt} AND et.tag = ANY(${input.tags}))`,
+      );
+    }
+
+    const limit = Math.min(input.limit, MAX_LIMIT);
+    // Candidate pool large enough that post-rank reshuffling has room to
+    // work without defeating pagination. `cursor` handles going deeper.
+    const fetchLimit = Math.max(limit * CANDIDATE_MULTIPLIER, 20);
+
+    const rows = await db
+      .select({
+        id: entry.id,
+        title: entry.title,
+        content: entry.content,
+        language: entry.language,
+        metadata: entry.metadata,
+        authority: entry.authority,
+        decayRate: entry.decayRate,
+        status: entry.status,
+        createdAt: entry.createdAt,
+        pgroongaScore: sql<number>`pgroonga_score(tableoid, ctid)`,
+      })
+      .from(entry)
+      .where(and(...conditions))
+      .orderBy(sql`pgroonga_score(tableoid, ctid) DESC`)
+      .limit(fetchLimit);
+
+    const enriched = await enrichRows(rows);
+    const ranked = rank(enriched, "query", queryTerms);
+
+    return slicePage(ranked, input.cursor, limit);
+  } finally {
+    timer();
+    logger.info({ query: input.query }, "search completed");
   }
-
-  const sliced = {
-    entries: ranked.entries.slice(startIdx, startIdx + limit),
-    scores: ranked.scores.slice(startIdx, startIdx + limit),
-    trustLevels: ranked.trustLevels.slice(startIdx, startIdx + limit),
-  };
-
-  const hasMore = startIdx + limit < ranked.entries.length;
-  const lastIdx = sliced.entries.length - 1;
-  const nextCursor =
-    hasMore && lastIdx >= 0
-      ? encodeCursor(sliced.scores[lastIdx]!.final, sliced.entries[lastIdx]!.id)
-      : undefined;
-
-  timer();
-  logger.info({ query: input.query, resultCount: sliced.entries.length }, "search completed");
-
-  return { ...sliced, nextCursor };
 }
 
 /**
@@ -140,8 +128,25 @@ export async function explore(input: ExploreInput): Promise<SearchResult> {
     );
   }
 
-  const fetchLimit = 50;
+  const limit = Math.min(input.limit, MAX_LIMIT);
+  const fetchLimit = Math.max(limit * CANDIDATE_MULTIPLIER, 20);
   const sortColumn = input.sortBy === "created_at" ? entry.createdAt : entry.authority;
+
+  // For explore we push cursor filtering into the SQL itself — the pool
+  // is large and the composite (authority, id) or (created_at, id)
+  // index delivers O(log N) keyset pagination.
+  const decoded = input.cursor ? decodeCursor(input.cursor) : null;
+  if (decoded) {
+    if (input.sortBy === "created_at") {
+      conditions.push(
+        sql`(EXTRACT(EPOCH FROM ${entry.createdAt}), ${entry.id}) < (${decoded.score}, ${decoded.id})`,
+      );
+    } else {
+      conditions.push(
+        sql`(${entry.authority}, ${entry.id}) < (${decoded.score}, ${decoded.id})`,
+      );
+    }
+  }
 
   const rows = await db
     .select({
@@ -164,19 +169,31 @@ export async function explore(input: ExploreInput): Promise<SearchResult> {
   const enriched = await enrichRows(rows);
   const ranked = rank(enriched, "explore");
 
-  // Apply cursor + limit
-  const limit = Math.min(input.limit, 50);
+  // Explore feeds ranking by authority+freshness, so the cursor still
+  // uses ranked final score for stability between pages.
+  return slicePage(ranked, undefined, limit, /* rankPath */ true, /* cursorFromDb */ decoded);
+}
+
+function slicePage(
+  ranked: ReturnType<typeof rank>,
+  cursor: string | undefined,
+  limit: number,
+  rankPath = true,
+  cursorFromDb: Cursor | null = null,
+): SearchResult {
+  const decoded = cursor ? decodeCursor(cursor) : cursorFromDb;
   let startIdx = 0;
-  if (input.cursor) {
-    const decoded = decodeCursor(input.cursor);
-    if (decoded) {
-      startIdx = ranked.entries.findIndex(
-        (e, i) =>
-          ranked.scores[i]!.final < decoded.score ||
-          (ranked.scores[i]!.final === decoded.score && e.id < decoded.id),
-      );
-      if (startIdx === -1) startIdx = ranked.entries.length;
-    }
+  if (decoded && rankPath) {
+    // Scan forward to the first ranked row strictly after the cursor
+    // position in (final desc, id desc) ordering. Matches rank.ts:132
+    // sort key (final desc, id.localeCompare(a,b) desc).
+    startIdx = ranked.entries.findIndex((e, i) => {
+      const s = ranked.scores[i]!.final;
+      if (s < decoded.score) return true;
+      if (s > decoded.score) return false;
+      return e.id.localeCompare(decoded.id) < 0;
+    });
+    if (startIdx === -1) startIdx = ranked.entries.length;
   }
 
   const sliced = {
@@ -185,14 +202,13 @@ export async function explore(input: ExploreInput): Promise<SearchResult> {
     trustLevels: ranked.trustLevels.slice(startIdx, startIdx + limit),
   };
 
-  const hasMore = startIdx + limit < ranked.entries.length;
   const lastIdx = sliced.entries.length - 1;
+  // We only expose a nextCursor when the page is full; a short page
+  // means we exhausted either the candidate pool or the matching set.
   const nextCursor =
-    hasMore && lastIdx >= 0
+    sliced.entries.length === limit && lastIdx >= 0
       ? encodeCursor(sliced.scores[lastIdx]!.final, sliced.entries[lastIdx]!.id)
       : undefined;
-
-  logger.info({ resultCount: sliced.entries.length }, "explore completed");
 
   return { ...sliced, nextCursor };
 }
@@ -276,13 +292,34 @@ function trustLevelToMinAuthority(level: string): number {
   }
 }
 
+/**
+ * Escape pgroonga query-language metacharacters. The `&@~` operator
+ * uses a Boolean grammar similar to groonga's script mode; `(`, `)`,
+ * `|`, `-`, `"`, `*` and whitespace all carry special meaning. We
+ * double-quote each term so it's treated as a literal phrase and
+ * internal double-quotes are backslash-escaped.
+ */
+function escapePgroongaTerm(term: string): string {
+  const escaped = term.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `"${escaped}"`;
+}
+
 function encodeCursor(score: number, id: string): string {
   return btoa(JSON.stringify({ score, id }));
 }
 
-function decodeCursor(cursor: string): { score: number; id: string } | null {
+function decodeCursor(cursor: string): Cursor | null {
   try {
-    return JSON.parse(atob(cursor)) as { score: number; id: string };
+    const parsed = JSON.parse(atob(cursor));
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as Cursor).score === "number" &&
+      typeof (parsed as Cursor).id === "string"
+    ) {
+      return parsed as Cursor;
+    }
+    return null;
   } catch {
     return null;
   }

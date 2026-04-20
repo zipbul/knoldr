@@ -1,19 +1,17 @@
 import { describe, expect, test, beforeAll } from "bun:test";
 import { decomposeQuery } from "../../src/collect/query-decompose";
 
-// Force ALL LLM paths to fail so fallbackQueries() is exercised.
-// `false` is a POSIX command that always exits non-zero; Ollama is
-// now primary (role-separated /api/chat) so we must also point its
-// host at an unreachable address for the fallback path to trigger.
+// Force the LLM to fail so fallbackQueries() is exercised. Ollama is
+// the only LLM path, so redirecting OLLAMA_HOST to an unreachable
+// port with a short timeout is enough.
 beforeAll(() => {
   process.env.OLLAMA_HOST = "http://127.0.0.1:1";
   process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
-  delete process.env.KNOLDR_ENABLE_CLOUD_CLI;
 });
 
 describe("Query Decompose", () => {
   test("fallback produces 3 queries when CLI fails", async () => {
-    // With no valid Gemini CLI, should fall back to 3 simple queries
+    // With the LLM unreachable, should fall back to 3 simple queries
     const queries = await decomposeQuery("test topic");
     expect(queries.length).toBe(3);
     expect(queries[0]!.main).toBe("test topic");

@@ -7,7 +7,6 @@ import { extractClaims, CLAIM_TYPES } from "../../src/claim/extract";
 beforeAll(() => {
   process.env.OLLAMA_HOST = "http://127.0.0.1:1";
   process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
-  delete process.env.KNOLDR_ENABLE_CLOUD_CLI;
 });
 
 describe("extractClaims — LLM unavailable", () => {

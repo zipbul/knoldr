@@ -34,16 +34,7 @@ services:
       OLLAMA_HOST: "${OLLAMA_HOST:-http://host.docker.internal:11434}"
       KNOLDR_OLLAMA_FAST_MODEL: "${KNOLDR_OLLAMA_FAST_MODEL:-gemma4:e4b}"
       KNOLDR_OLLAMA_JURY_MODELS: "${KNOLDR_OLLAMA_JURY_MODELS:-gemma4:e4b,qwen2.5:14b}"
-      # Cloud CLI fallback is OPT-IN. Leave KNOLDR_ENABLE_CLOUD_CLI
-      # unset for a local-only deployment (default). When enabled,
-      # set KNOLDR_CODEX_CLI / KNOLDR_GEMINI_CLI and the matching
-      # KNOLDR_CLOUD_CODEX_MODEL / KNOLDR_CLOUD_GEMINI_MODEL, and
-      # mount credential volumes for the CLIs you use.
-      KNOLDR_ENABLE_CLOUD_CLI: "${KNOLDR_ENABLE_CLOUD_CLI:-}"
-      KNOLDR_CODEX_CLI: "${KNOLDR_CODEX_CLI:-}"
-      KNOLDR_GEMINI_CLI: "${KNOLDR_GEMINI_CLI:-}"
-      KNOLDR_CLOUD_CODEX_MODEL: "${KNOLDR_CLOUD_CODEX_MODEL:-}"
-      KNOLDR_CLOUD_GEMINI_MODEL: "${KNOLDR_CLOUD_GEMINI_MODEL:-}"
+      KNOLDR_OLLAMA_TIMEOUT_MS: "${KNOLDR_OLLAMA_TIMEOUT_MS:-120000}"
       # Self-hosted SearXNG meta-search for web_search fallback when
       # an entry has no usable cited sources.
       SEARXNG_URL: "${SEARXNG_URL:-http://searxng:8080}"

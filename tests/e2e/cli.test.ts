@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { setupTestDb, cleanTestDb, teardownTestDb } from "../helpers/db";
-import { startMockEmbeddingServer, stopMockServers, MOCK_CODEX_CLI } from "../helpers/mock-apis";
+import { startMockEmbeddingServer, startMockOllamaServer, stopMockServers } from "../helpers/mock-apis";
 import { join } from "path";
 
 const CLI_PATH = join(import.meta.dir, "../../src/cli/index.ts");
@@ -10,7 +10,10 @@ const env = {
   DATABASE_URL: process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/knoldr_test",
   KNOLDR_EMBEDDING_BASE_URL: "http://localhost:19879",
   KNOLDR_EMBEDDING_API_KEY: "test-key",
-  KNOLDR_CODEX_CLI: MOCK_CODEX_CLI,
+  OLLAMA_HOST: "http://127.0.0.1:11499",
+  KNOLDR_OLLAMA_FAST_MODEL: "mock",
+  KNOLDR_OLLAMA_JURY_MODELS: "mock",
+  KNOLDR_OLLAMA_TIMEOUT_MS: "2000",
   KNOLDR_LOG_LEVEL: "error",
 };
 
@@ -41,6 +44,7 @@ beforeAll(async () => {
   }
 
   startMockEmbeddingServer(19879);
+  startMockOllamaServer(11499);
 });
 
 afterEach(async () => {

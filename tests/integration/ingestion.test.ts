@@ -2,10 +2,9 @@ import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test
 import { setupTestDb, cleanTestDb, teardownTestDb, getTestDb, getTestClient } from "../helpers/db";
 import {
   startMockEmbeddingServer,
+  startMockOllamaServer,
   stopMockServers,
-  MOCK_CODEX_CLI,
-  setCodexHandler,
-  fakeEmbedding,
+  setOllamaHandler,
 } from "../helpers/mock-apis";
 
 // Set env vars before importing app modules
@@ -13,15 +12,13 @@ process.env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://loc
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
-// Cloud-CLI path is opt-in at runtime now. Enable it for this test
-// so the mock Codex binary actually gets invoked. Also block the
-// Ollama primary path so mock Codex is the only route — without
-// this, a live Ollama on the host runs the real pipeline instead.
-process.env.KNOLDR_ENABLE_CLOUD_CLI = "1";
-process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
-process.env.KNOLDR_CLOUD_CODEX_MODEL = "mock";
-process.env.OLLAMA_HOST = "http://127.0.0.1:1";
-process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
+// Route LLM calls at the mock Ollama on port 11499 (real Ollama on
+// 11434 stays untouched). Short timeout so any test that expects a
+// graceful-degradation path fails fast rather than hanging.
+process.env.OLLAMA_HOST = "http://127.0.0.1:11499";
+process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "2000";
+process.env.KNOLDR_OLLAMA_FAST_MODEL = "mock";
+process.env.KNOLDR_OLLAMA_JURY_MODELS = "mock";
 
 // Dynamic imports to pick up env vars
 let ingest: typeof import("../../src/ingest/engine").ingest;
@@ -39,6 +36,7 @@ beforeAll(async () => {
   }
 
   startMockEmbeddingServer(19876);
+  startMockOllamaServer(11499);
 
   const engineMod = await import("../../src/ingest/engine");
   const validateMod = await import("../../src/ingest/validate");
@@ -48,7 +46,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
   if (dbAvailable) await cleanTestDb();
-  setCodexHandler(null);
+  setOllamaHandler(null);
 });
 
 afterAll(async () => {
@@ -85,7 +83,7 @@ describe("Ingestion Engine — Mode 1 (raw)", () => {
   test("handles LLM returning multiple entries", async () => {
     if (!dbAvailable) return;
 
-    setCodexHandler("multi");
+    setOllamaHandler("multi");
 
     const input = parseStoreInput({ raw: "Multi-topic article" });
     const results = await ingest(input);
@@ -98,7 +96,7 @@ describe("Ingestion Engine — Mode 1 (raw)", () => {
   test("logs rejected when LLM fails", async () => {
     if (!dbAvailable) return;
 
-    setCodexHandler("fail");
+    setOllamaHandler("fail");
 
     const input = parseStoreInput({ raw: "Bad input that LLM can't handle" });
     const results = await ingest(input);

@@ -199,10 +199,9 @@ export function startServer() {
 
   // Claim extraction worker — every 60 seconds, batch=3
   // Picks recently stored entries without claims and extracts them
-  // serially. Separated from ingest so bursty research doesn't spawn
-  // dozens of concurrent LLM CLI subprocesses. Cadence is deliberately
-  // slower than ingest burst rate — OpenAI/Gemini OAuth free tiers
-  // exhaust quickly otherwise.
+  // serially. Separated from ingest so bursty research doesn't
+  // saturate Ollama with dozens of concurrent generations that each
+  // hold a model in memory.
   setInterval(async () => {
     await withClusterLock("claim-extract", async () => {
       try {

@@ -3,6 +3,7 @@ import postgres from "postgres";
 import * as schema from "./schema";
 
 let _db: ReturnType<typeof drizzle<typeof schema>> | null = null;
+let _client: ReturnType<typeof postgres> | null = null;
 
 function init(): ReturnType<typeof drizzle<typeof schema>> {
   if (_db) return _db;
@@ -12,7 +13,7 @@ function init(): ReturnType<typeof drizzle<typeof schema>> {
     throw new Error("DATABASE_URL environment variable is required");
   }
 
-  const client = postgres(connectionString, {
+  _client = postgres(connectionString, {
     // Pool sized for concurrent verify batch (15) × per-verify
     // connection demand (SELECT claim/queue/sources + KG queries
     // + per-tx UPDATE/DELETE). 20 was choking every worker when
@@ -25,7 +26,7 @@ function init(): ReturnType<typeof drizzle<typeof schema>> {
     connect_timeout: 10,
   });
 
-  _db = drizzle(client, { schema });
+  _db = drizzle(_client, { schema });
   return _db;
 }
 
@@ -36,3 +37,14 @@ export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
     return (instance as unknown as Record<string | symbol, unknown>)[prop];
   },
 });
+
+/**
+ * Raw postgres-js client for operations that require a *pinned*
+ * session — specifically Postgres advisory locks, which are
+ * session-scoped and cannot be released from a different connection
+ * in the pool.
+ */
+export function getPgClient(): ReturnType<typeof postgres> {
+  init();
+  return _client!;
+}

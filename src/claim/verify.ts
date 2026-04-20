@@ -648,16 +648,24 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
 
 async function processVerifyQueueInner(batchSize: number): Promise<number> {
   const now = new Date();
-  // FOR UPDATE SKIP LOCKED: even though the single-flight guard
-  // prevents overlapping ticks *within* this process, a second app
-  // replica or a misbehaving cron would still race on the queue.
-  // Row-level locks are cheap and make the batch pick-up atomic.
+  // FOR UPDATE SKIP LOCKED: row-level locks so overlapping ticks
+  // or multi-replica deployments can't double-dispatch.
+  //
+  // Ordering: effective priority = static priority + age boost.
+  // Static priority alone caused starvation — 12k old rows at
+  // priority=10 never surfaced while new extractions kept landing
+  // at priority=60+ and refilling the top of the heap every cycle.
+  // Adding 2 points per hour queued means a day-old priority=10
+  // row (10 + 48 = 58) starts competing with current priority=60
+  // work, and a 6-day-old one (10 + 288) supersedes anything short
+  // of a manual escalation.
   const due = (await db.execute(sql`
     SELECT claim_id, attempts
     FROM verify_queue
     WHERE next_attempt_at <= ${now}
       AND attempts < 3
-    ORDER BY priority DESC, next_attempt_at
+    ORDER BY priority + EXTRACT(EPOCH FROM (NOW() - queued_at)) / 1800 DESC,
+             queued_at ASC
     LIMIT ${batchSize}
     FOR UPDATE SKIP LOCKED
   `)) as unknown as Array<{ claim_id: string; attempts: number }>;

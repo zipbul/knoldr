@@ -1,25 +1,21 @@
-import { sql } from "drizzle-orm";
-import { db } from "../db/connection";
+import { getPgClient } from "../db/connection";
 import { logger } from "./logger";
 
 /**
  * Postgres advisory-lock based mutex for cluster-wide singleton
  * workers.
  *
- * The server's setInterval loops (batch dedup, reclassify, claim
- * extraction, KG extraction, verify, calibration, drift, invariants,
- * smoke eval) were all using process-local flags (e.g. `verifyRunning`)
- * or no flag at all. In a single-process deployment this is fine; as
- * soon as you scale to two replicas every tick runs on every replica
- * — 2× batch-dedup, 2× calibration, 2× smoke eval, 2× drift, etc.
+ * Session pinning is MANDATORY: `pg_try_advisory_lock` / `pg_advisory_unlock`
+ * are SESSION-scoped. The drizzle+postgres-js pool hands out a
+ * different backend connection per query by default, so the acquire
+ * runs on connection A, the worker body runs on B/C/D, and the
+ * release runs on E — Postgres logs "you don't own a lock of type
+ * ExclusiveLock" and the lock on A leaks until that connection is
+ * recycled.
  *
- * `pg_try_advisory_lock` gives us a non-blocking lock that survives as
- * long as the Postgres SESSION holds it. We grab the lock before each
- * worker body runs; release in a `finally` so a crash frees the
- * session and the lock unwinds naturally.
- *
- * Key space is a 64-bit integer — hash the worker name so operators
- * don't need to manage numbers.
+ * `postgres.reserve()` returns a dedicated connection that every
+ * query in the worker callback shares. Release the reservation in
+ * `finally` so the pool reclaims it regardless of outcome.
  */
 function keyFor(name: string): bigint {
   // 64-bit FNV-1a
@@ -30,36 +26,36 @@ function keyFor(name: string): bigint {
     h ^= BigInt(name.charCodeAt(i));
     h = (h * prime) & mask;
   }
-  // Map uint64 → int64 two's complement so the number fits
-  // Postgres's signed bigint argument.
   const signMask = 1n << 63n;
   return h >= signMask ? h - (1n << 64n) : h;
 }
 
-/**
- * Run `fn` exactly once across the cluster for each tick. Returns the
- * fn's return value on success, or null if another replica holds the
- * lock (caller should skip silently).
- */
 export async function withClusterLock<T>(
   name: string,
   fn: () => Promise<T>,
 ): Promise<T | null> {
-  const key = keyFor(name);
-  const acquired = (await db.execute(
-    sql`SELECT pg_try_advisory_lock(${key.toString()}::bigint) AS ok`,
-  )) as unknown as Array<{ ok: boolean }>;
-  if (!acquired[0]?.ok) {
-    logger.debug({ worker: name }, "advisory lock busy, skipping tick");
-    return null;
-  }
+  const key = keyFor(name).toString();
+  const client = getPgClient();
+  const reserved = await client.reserve();
   try {
-    return await fn();
-  } finally {
-    try {
-      await db.execute(sql`SELECT pg_advisory_unlock(${key.toString()}::bigint)`);
-    } catch (err) {
-      logger.warn({ worker: name, error: (err as Error).message }, "lock release failed");
+    const rows = await reserved<Array<{ ok: boolean }>>`SELECT pg_try_advisory_lock(${key}::bigint) AS ok`;
+    if (!rows[0]?.ok) {
+      logger.debug({ worker: name }, "advisory lock busy, skipping tick");
+      return null;
     }
+    try {
+      return await fn();
+    } finally {
+      try {
+        await reserved`SELECT pg_advisory_unlock(${key}::bigint)`;
+      } catch (err) {
+        logger.warn(
+          { worker: name, error: (err as Error).message },
+          "advisory lock release failed",
+        );
+      }
+    }
+  } finally {
+    reserved.release();
   }
 }

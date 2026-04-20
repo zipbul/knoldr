@@ -73,24 +73,33 @@ export async function processReclassifyQueue(batchSize = 3): Promise<number> {
             ),
           );
         if (meta.domain.length > 0) {
-          await tx.insert(entryDomain).values(
-            meta.domain.map((d) => ({
-              entryId: row.id,
-              entryCreatedAt: createdAt,
-              domain: d,
-            })),
-          );
+          await tx
+            .insert(entryDomain)
+            .values(
+              meta.domain.map((d) => ({
+                entryId: row.id,
+                entryCreatedAt: createdAt,
+                domain: d,
+              })),
+            )
+            .onConflictDoNothing();
         }
 
-        // Add tags
+        // Add tags. Reclassify can re-visit the same entry and
+        // propose tags that already exist from a prior pass — let
+        // the UNIQUE constraint absorb duplicates instead of
+        // failing the whole transaction.
         if (meta.tags.length > 0) {
-          await tx.insert(entryTag).values(
-            meta.tags.map((t) => ({
-              entryId: row.id,
-              entryCreatedAt: createdAt,
-              tag: t,
-            })),
-          );
+          await tx
+            .insert(entryTag)
+            .values(
+              meta.tags.map((t) => ({
+                entryId: row.id,
+                entryCreatedAt: createdAt,
+                tag: t,
+              })),
+            )
+            .onConflictDoNothing();
         }
       });
       processed++;

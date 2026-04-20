@@ -227,6 +227,32 @@ export function startServer() {
     }
   }, 6 * 60 * 60 * 1000);
 
+  // Invariant checks — every minute. Publishes Prometheus gauges
+  // for queue eligibility, orphan rows, evidence consistency. Alerts
+  // fire from the metrics, not the code: a non-zero orphan count is
+  // the signal. Cheap to run (all SELECT COUNT), safe on hot DB.
+  setInterval(async () => {
+    try {
+      const { runInvariantChecks } = await import("../observability/invariants");
+      await runInvariantChecks();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "invariant checks failed");
+    }
+  }, 60 * 1000);
+
+  // Smoke evaluation — every hour. Samples 20 high-consensus
+  // verdicts, re-verifies through the current pipeline, flags
+  // divergences. Without a gold set this is our proxy for regression
+  // detection: a sudden spike in divergence means something shifted.
+  setInterval(async () => {
+    try {
+      const { runSmokeEval } = await import("../claim/smoke-eval");
+      await runSmokeEval();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, "smoke eval failed");
+    }
+  }, 60 * 60 * 1000);
+
   logger.info({ port, host }, "knoldr A2A server started");
   return server;
 }

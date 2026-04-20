@@ -1,0 +1,93 @@
+import { sql } from "drizzle-orm";
+import { db } from "../db/connection";
+import { invariantQueueEligible, invariantOrphans } from "./metrics";
+import { logger } from "./logger";
+
+// Periodic invariant checks. These queries encode the *shapes* the
+// DB is supposed to stay in: queues drain, no orphaned FK rows,
+// verdict↔evidence consistency, KG nodes reachable. Each value is
+// published as a Prometheus gauge; an alert on non-zero
+// `knoldr_orphan_rows{check=...}` catches data drift that the
+// exception-based error logging will never see.
+
+const CHECKS: Array<{ name: string; sql: string; expect: "zero" | "monitor" }> = [
+  {
+    name: "claim_missing_evidence_but_verified",
+    sql: `
+      SELECT COUNT(*)::int AS n FROM claim
+      WHERE verdict IN ('verified', 'disputed')
+        AND evidence IS NULL
+    `,
+    expect: "zero",
+  },
+  {
+    name: "verify_queue_orphaned",
+    sql: `
+      SELECT COUNT(*)::int AS n
+      FROM verify_queue vq
+      LEFT JOIN claim c ON c.id = vq.claim_id
+      WHERE c.id IS NULL
+    `,
+    expect: "zero",
+  },
+  {
+    name: "kg_relation_orphan_entity",
+    sql: `
+      SELECT COUNT(*)::int AS n
+      FROM kg_relation r
+      LEFT JOIN entity s ON s.id = r.source_entity_id
+      LEFT JOIN entity t ON t.id = r.target_entity_id
+      WHERE s.id IS NULL OR t.id IS NULL
+    `,
+    expect: "zero",
+  },
+  {
+    name: "entry_tag_orphan",
+    sql: `
+      SELECT COUNT(*)::int AS n
+      FROM entry_tag et
+      LEFT JOIN entry e ON e.id = et.entry_id AND e.created_at = et.entry_created_at
+      WHERE e.id IS NULL
+    `,
+    expect: "zero",
+  },
+  {
+    name: "claim_stuck_in_queue_over_24h",
+    sql: `
+      SELECT COUNT(*)::int AS n
+      FROM verify_queue
+      WHERE queued_at < NOW() - INTERVAL '24 hours'
+        AND attempts < 3
+    `,
+    expect: "monitor",
+  },
+];
+
+const QUEUES = [
+  { name: "verify_queue", sql: "SELECT COUNT(*)::int AS n FROM verify_queue WHERE attempts < 3 AND next_attempt_at <= NOW()" },
+  { name: "retry_queue", sql: "SELECT COUNT(*)::int AS n FROM retry_queue WHERE attempts < 3 AND next_retry_at <= NOW()" },
+];
+
+export async function runInvariantChecks(): Promise<void> {
+  for (const q of QUEUES) {
+    try {
+      const rows = (await db.execute(sql.raw(q.sql))) as unknown as Array<{ n: number }>;
+      const n = rows[0]?.n ?? 0;
+      invariantQueueEligible.set({ queue: q.name }, n);
+    } catch (err) {
+      logger.warn({ queue: q.name, error: (err as Error).message }, "queue gauge failed");
+    }
+  }
+  for (const c of CHECKS) {
+    try {
+      const rows = (await db.execute(sql.raw(c.sql))) as unknown as Array<{ n: number }>;
+      const n = rows[0]?.n ?? 0;
+      invariantOrphans.set({ check: c.name }, n);
+      if (c.expect === "zero" && n > 0) {
+        logger.warn({ check: c.name, count: n }, "invariant violated");
+      }
+    } catch (err) {
+      logger.warn({ check: c.name, error: (err as Error).message }, "invariant check failed");
+    }
+  }
+}

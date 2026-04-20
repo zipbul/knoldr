@@ -20,6 +20,7 @@ import { hasNegation, NEGATION_DAMPING } from "./negation";
 import { counterSearch } from "./counter-search";
 import { qaVerify } from "../llm/docqa";
 import { bespokeCheck } from "../llm/bespoke-check";
+import { verifyVerdicts, verifyErrors } from "../observability/metrics";
 import { logger } from "../observability/logger";
 
 const VERDICTS = ["verified", "disputed", "unverified"] as const;
@@ -697,6 +698,10 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
           .where(eq(claim.id, item.claimId));
         await tx.delete(verifyQueue).where(eq(verifyQueue.claimId, item.claimId));
       });
+      verifyVerdicts.inc({
+        source: (result!.evidence as { source?: string }).source ?? "unknown",
+        verdict: result!.verdict,
+      });
       return { committed: true };
     }),
   );
@@ -707,6 +712,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
     if (r.status === "fulfilled" && r.value.committed) {
       processed++;
     } else if (r.status === "rejected") {
+      verifyErrors.inc({ kind: "verify_exception" });
       logger.warn(
         { claimId: dueItems[i]!.claimId, error: (r.reason as Error).message },
         "verify failed, rescheduling",

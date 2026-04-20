@@ -13,7 +13,14 @@ function init(): ReturnType<typeof drizzle<typeof schema>> {
   }
 
   const client = postgres(connectionString, {
-    max: 20,
+    // Pool sized for concurrent verify batch (15) × per-verify
+    // connection demand (SELECT claim/queue/sources + KG queries
+    // + per-tx UPDATE/DELETE). 20 was choking every worker when
+    // batch=15 landed — failed queries cascaded through extract /
+    // reclassify / retry workers that shared the pool. Postgres
+    // default max_connections is 100; 80 leaves headroom for the
+    // psql diagnostics + fine-tune sidecar.
+    max: 80,
     idle_timeout: 30,
     connect_timeout: 10,
   });

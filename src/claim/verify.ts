@@ -718,7 +718,6 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
 }
 
 async function processVerifyQueueInner(batchSize: number): Promise<number> {
-  const now = new Date();
   // FOR UPDATE SKIP LOCKED: row-level locks so overlapping ticks
   // or multi-replica deployments can't double-dispatch.
   //
@@ -730,10 +729,14 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
   // row (10 + 48 = 58) starts competing with current priority=60
   // work, and a 6-day-old one (10 + 288) supersedes anything short
   // of a manual escalation.
+  //
+  // Use NOW() in SQL rather than binding a JS Date — drizzle's sql
+  // template passes Date objects directly to postgres-js which
+  // rejects them for TIMESTAMPTZ params ("must be string or Buffer").
   const due = (await db.execute(sql`
     SELECT claim_id, attempts
     FROM verify_queue
-    WHERE next_attempt_at <= ${now}
+    WHERE next_attempt_at <= NOW()
       AND attempts < 3
     ORDER BY priority + EXTRACT(EPOCH FROM (NOW() - queued_at)) / 1800 DESC,
              queued_at ASC

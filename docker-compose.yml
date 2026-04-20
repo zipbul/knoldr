@@ -36,10 +36,19 @@ services:
       KNOLDR_OLLAMA_JURY_MODELS: "${KNOLDR_OLLAMA_JURY_MODELS:-gemma4:e4b,qwen2.5:14b}"
       KNOLDR_OLLAMA_TIMEOUT_MS: "${KNOLDR_OLLAMA_TIMEOUT_MS:-120000}"
       # Cap onnxruntime per-op threads to prevent NLI / reranker /
-      # embedding model forwards from saturating every core on the
-      # host. 2 is enough for a 60s verify tick to drain batchSize=6
-      # on our hardware while leaving headroom for other workers.
+      # embedding model forwards from saturating every core. We set
+      # this at three layers because onnxruntime uses whichever
+      # backend (wasm / node-native / openblas) it was linked with:
+      #   - KNOLDR_ONNX_THREADS: read by configureOnnxRuntime() to
+      #     set @huggingface/transformers env.backends.onnx.wasm.numThreads
+      #   - OMP_NUM_THREADS / OPENBLAS_NUM_THREADS / MKL_NUM_THREADS:
+      #     OS-level cap respected by native ORT + BLAS backends
+      #   - ORT_INTRA_OP_NUM_THREADS: onnxruntime-node's own limit
       KNOLDR_ONNX_THREADS: "${KNOLDR_ONNX_THREADS:-2}"
+      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-2}"
+      OPENBLAS_NUM_THREADS: "${OPENBLAS_NUM_THREADS:-2}"
+      MKL_NUM_THREADS: "${MKL_NUM_THREADS:-2}"
+      ORT_INTRA_OP_NUM_THREADS: "${ORT_INTRA_OP_NUM_THREADS:-2}"
       # Self-hosted SearXNG meta-search for web_search fallback when
       # an entry has no usable cited sources.
       SEARXNG_URL: "${SEARXNG_URL:-http://searxng:8080}"
@@ -49,6 +58,14 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    # Hard cap on container CPU so a runaway verify tick can't
+    # dominate the host. 8 cores is enough for batch=6 verify +
+    # other workers with the thread caps above; raise if the host
+    # has more headroom to give.
+    deploy:
+      resources:
+        limits:
+          cpus: "${KNOLDR_APP_CPUS:-8}"
 
   db-test:
     build:

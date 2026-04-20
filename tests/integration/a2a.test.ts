@@ -11,6 +11,8 @@ process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
 // Gemini CLI is a real spawn; forcing /bin/false keeps fallback path
 // quick and deterministic for anything the mock codex does not handle.
 process.env.KNOLDR_GEMINI_CLI = "false";
+process.env.OLLAMA_HOST = "http://127.0.0.1:1";
+process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
 process.env.KNOLDR_PORT = "19960";
 process.env.KNOLDR_API_TOKEN = "test-token";
 

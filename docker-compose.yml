@@ -44,11 +44,11 @@ services:
       #   - OMP_NUM_THREADS / OPENBLAS_NUM_THREADS / MKL_NUM_THREADS:
       #     OS-level cap respected by native ORT + BLAS backends
       #   - ORT_INTRA_OP_NUM_THREADS: onnxruntime-node's own limit
-      KNOLDR_ONNX_THREADS: "${KNOLDR_ONNX_THREADS:-2}"
-      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-2}"
-      OPENBLAS_NUM_THREADS: "${OPENBLAS_NUM_THREADS:-2}"
-      MKL_NUM_THREADS: "${MKL_NUM_THREADS:-2}"
-      ORT_INTRA_OP_NUM_THREADS: "${ORT_INTRA_OP_NUM_THREADS:-2}"
+      KNOLDR_ONNX_THREADS: "${KNOLDR_ONNX_THREADS:-4}"
+      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-4}"
+      OPENBLAS_NUM_THREADS: "${OPENBLAS_NUM_THREADS:-4}"
+      MKL_NUM_THREADS: "${MKL_NUM_THREADS:-4}"
+      ORT_INTRA_OP_NUM_THREADS: "${ORT_INTRA_OP_NUM_THREADS:-4}"
       # Self-hosted SearXNG meta-search for web_search fallback when
       # an entry has no usable cited sources.
       SEARXNG_URL: "${SEARXNG_URL:-http://searxng:8080}"

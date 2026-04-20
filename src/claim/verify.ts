@@ -1,5 +1,5 @@
 import { z } from "zod/v4";
-import { eq, sql, desc, and, lte, lt } from "drizzle-orm";
+import { eq, sql, and } from "drizzle-orm";
 import { db } from "../db/connection";
 import { claim, verifyQueue, entry, entryScore, entrySource } from "../db/schema";
 import { callAllLlms, extractJson, type LlmVote } from "../llm/cli";
@@ -624,23 +624,43 @@ async function llmJury(
   };
 }
 
+// Single-flight guard. `setInterval` fires every 60s but a full
+// batch can take 2-3 minutes, so successive ticks would race on the
+// same verify_queue rows — each tick's SELECT (without FOR UPDATE)
+// saw rows the prior tick had already dispatched, both workers then
+// raced on verifyClaim and the loser hit "claim not found" errors
+// after the winner committed + deleted. This flag makes overlapping
+// ticks a no-op; the live tick's concurrent batch still fans out
+// via Promise.allSettled so throughput is unaffected.
+let verifyRunning = false;
+
 /** Process up to `batchSize` claims from the verify queue. */
 export async function processVerifyQueue(batchSize = 5): Promise<number> {
+  if (verifyRunning) return 0;
+  verifyRunning = true;
+  try {
+    return await processVerifyQueueInner(batchSize);
+  } finally {
+    verifyRunning = false;
+  }
+}
+
+async function processVerifyQueueInner(batchSize: number): Promise<number> {
   const now = new Date();
-  const due = await db
-    .select({
-      claimId: verifyQueue.claimId,
-      attempts: verifyQueue.attempts,
-    })
-    .from(verifyQueue)
-    .where(
-      and(
-        lte(verifyQueue.nextAttemptAt, now),
-        lt(verifyQueue.attempts, 3),
-      ),
-    )
-    .orderBy(desc(verifyQueue.priority), verifyQueue.nextAttemptAt)
-    .limit(batchSize);
+  // FOR UPDATE SKIP LOCKED: even though the single-flight guard
+  // prevents overlapping ticks *within* this process, a second app
+  // replica or a misbehaving cron would still race on the queue.
+  // Row-level locks are cheap and make the batch pick-up atomic.
+  const due = (await db.execute(sql`
+    SELECT claim_id, attempts
+    FROM verify_queue
+    WHERE next_attempt_at <= ${now}
+      AND attempts < 3
+    ORDER BY priority DESC, next_attempt_at
+    LIMIT ${batchSize}
+    FOR UPDATE SKIP LOCKED
+  `)) as unknown as Array<{ claim_id: string; attempts: number }>;
+  const dueItems = due.map((r) => ({ claimId: r.claim_id, attempts: r.attempts }));
 
   // Concurrent batch. Each claim's verify is dominated by network
   // waits (URL fetches, LLM HTTP, SearXNG) — `Promise.allSettled`
@@ -649,7 +669,7 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
   // forward passes still serialize on the JS thread, but those are
   // microseconds compared to the seconds-each network waits.
   const results = await Promise.allSettled(
-    due.map(async (item) => {
+    dueItems.map(async (item) => {
       let result = await verifyClaim(item.claimId);
       if (!result) {
         if (item.attempts < 2) {
@@ -688,10 +708,10 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
       processed++;
     } else if (r.status === "rejected") {
       logger.warn(
-        { claimId: due[i]!.claimId, error: (r.reason as Error).message },
+        { claimId: dueItems[i]!.claimId, error: (r.reason as Error).message },
         "verify failed, rescheduling",
       );
-      await bumpAttempt(due[i]!.claimId);
+      await bumpAttempt(dueItems[i]!.claimId);
     }
   }
 

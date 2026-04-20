@@ -47,9 +47,10 @@ export async function decompose(rawText: string): Promise<DecomposeResponse> {
   }
 
   // Retry: extend the SYSTEM prompt with a bounded error hint so the
-  // untrusted `rawText` stays isolated in the user role. Inlining the
-  // raw error into the retry still opens a recursive-injection vector
-  // on the cloud-CLI flat path, so we sanitize the hint regardless.
+  // untrusted `rawText` stays isolated in the user role. The hint
+  // itself is sanitized because the error message may echo model
+  // output containing instruction-like phrases that would otherwise
+  // become part of the SYSTEM prompt on retry.
   try {
     const hint = sanitizeErrorHint(firstError!.message);
     const system = `${SYSTEM_PROMPT}\n\nRetry note: previous attempt failed (${hint}). Fix the output format; respond with JSON only.`;

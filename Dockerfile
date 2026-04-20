@@ -1,14 +1,5 @@
 FROM oven/bun:1
 
-# Node.js required by codex CLI
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    nodejs npm \
-    && rm -rf /var/lib/apt/lists/*
-
-# LLM CLIs (query decomposition, link filtering)
-RUN npm install -g @openai/codex \
-    && bun install -g @google/gemini-cli
-
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production

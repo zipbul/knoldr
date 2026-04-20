@@ -889,16 +889,10 @@ knoldr/
 | ORM | drizzle-orm | 타입 세이프, PostgreSQL 지원. raw SQL 최소화. |
 | DB Driver | postgres (porsager) | Bun 호환, 고성능 |
 | Migration | drizzle-kit | drizzle-orm 통합 |
-| Decompose LLM | Codex CLI (GPT-4.1 mini) | 지시 준수 + 구조화 출력 최고 품질/비용비. 구독제. |
-| Research LLM | Gemini CLI (Gemini 2.0 Flash) | 1M 컨텍스트, $0.63/day. 구독제. |
-| DOM Parser | linkedom + @mozilla/readability | Playwright 추출 HTML의 본문 파싱 |
-| A2A | @a2a-js/sdk (타입 + server 코어) + Bun.serve() | SDK가 타입 + JSON-RPC 파싱/라우팅 제공. Express 불필요 (optional peer dep). HTTP 레이어만 Bun-native. |
-| Verification | pyreez (설치형) | 멀티모델 심의, deliberation engine 직접 호출 (v0.3) |
-| Web Search | DuckDuckGo Lite (HTTP scraping) | API key 불필요. 무료. |
-| Content Extraction | Playwright + @mozilla/readability | JS 렌더링 + 본문 추출 (SSR/SPA 대응). 자체 호스팅. |
-| PDF Extraction | pdf-parse | PDF → 텍스트 추출. 표/목차 포함. |
-| Image Extraction | Gemini CLI (멀티모달) | 이미지 → 텍스트. 다이어그램/스크린샷/인포그래픽 대응. 구독제. |
-| Video Transcript | innertube scraping + 자막 파싱 | 영상 콘텐츠 텍스트화. API key 불필요. 자막 없으면 Gemini 멀티모달 폴백. |
+| LLM | Ollama (local) | 모든 LLM 호출은 로컬 Ollama `/api/chat` 엔드포인트 사용. 구독 없음, 데이터 반출 없음, quota 없음. |
+| DOM Parser | jsdom + @mozilla/readability | fetch 된 HTML 의 본문 추출 |
+| A2A | @a2a-js/sdk (타입 + server 코어) + Bun.serve() | SDK가 타입 + JSON-RPC 파싱/라우팅 제공. HTTP 레이어만 Bun-native. |
+| Web Search | LangSearch API + SearXNG (self-hosted) | Research 경로는 LangSearch, verify 경로는 SearXNG meta-search. |
 | Observability | prom-client + pino | Prometheus 메트릭 + 구조화 로그 |
 
 ### 하드웨어 요구사항
@@ -920,9 +914,12 @@ knoldr/
 |------|:----:|--------|------|
 | `DATABASE_URL` | O | - | PostgreSQL 연결 문자열 (e.g., `postgres://user:pass@host:5432/knoldr`) |
 | `LANGSEARCH_API_KEY` | O | - | LangSearch web search API key (https://langsearch.com/dashboard) |
-| `KNOLDR_API_TOKEN` | X | - | A2A Bearer token 인증. 미설정 시 open access. |
-| `KNOLDR_CODEX_CLI` | X | `codex` | Codex CLI 실행 경로 (분해용) |
-| `KNOLDR_GEMINI_CLI` | X | `gemini` | Gemini CLI 실행 경로 (리서치용) |
+| `KNOLDR_API_TOKEN` | X | - | A2A Bearer token 인증. NODE_ENV=production 시 필수. |
+| `OLLAMA_HOST` | X | `http://localhost:11434` | 로컬 Ollama HTTP 엔드포인트 |
+| `KNOLDR_OLLAMA_FAST_MODEL` | X | `gemma4:e4b` | 단일-호출 경로 모델 (decompose / classify / extract / triples / CoVe / QA / query-decompose / counter-search / paraphrase) |
+| `KNOLDR_OLLAMA_JURY_MODELS` | X | `gemma4:e4b,qwen2.5:14b` | verify 시 jury 로 병렬 호출할 모델들 (콤마 구분) |
+| `KNOLDR_OLLAMA_TIMEOUT_MS` | X | `120000` | Ollama HTTP 호출 타임아웃 |
+| `KNOLDR_ALLOWED_INTERNAL_HOSTS` | X | - | SSRF 가드를 우회할 신뢰 intranet 호스트 화이트리스트 (콤마 구분) |
 | `KNOLDR_PORT` | X | `5100` | 서버 포트 |
 | `KNOLDR_HOST` | X | `0.0.0.0` | 서버 바인드 주소 |
 | `KNOLDR_LOG_LEVEL` | X | `info` | 로그 레벨 (`error`, `warn`, `info`, `debug`) |

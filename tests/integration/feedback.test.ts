@@ -1,16 +1,15 @@
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { setupTestDb, cleanTestDb, teardownTestDb, getTestClient } from "../helpers/db";
-import { startMockEmbeddingServer, stopMockServers, MOCK_CODEX_CLI } from "../helpers/mock-apis";
+import { startMockEmbeddingServer, startMockOllamaServer, stopMockServers } from "../helpers/mock-apis";
 
 process.env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/knoldr_test";
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.KNOLDR_EMBEDDING_BASE_URL = "http://localhost:19876";
 process.env.KNOLDR_EMBEDDING_API_KEY = "test-key";
-process.env.KNOLDR_ENABLE_CLOUD_CLI = "1";
-process.env.KNOLDR_CODEX_CLI = MOCK_CODEX_CLI;
-process.env.KNOLDR_CLOUD_CODEX_MODEL = "mock";
-process.env.OLLAMA_HOST = "http://127.0.0.1:1";
-process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "200";
+process.env.OLLAMA_HOST = "http://127.0.0.1:11499";
+process.env.KNOLDR_OLLAMA_TIMEOUT_MS = "2000";
+process.env.KNOLDR_OLLAMA_FAST_MODEL = "mock";
+process.env.KNOLDR_OLLAMA_JURY_MODELS = "mock";
 
 let processFeedback: typeof import("../../src/score/feedback").processFeedback;
 let RateLimitError: typeof import("../../src/score/feedback").RateLimitError;
@@ -29,6 +28,7 @@ beforeAll(async () => {
   }
 
   startMockEmbeddingServer(19876);
+  startMockOllamaServer(11499);
 
   const fbMod = await import("../../src/score/feedback");
   processFeedback = fbMod.processFeedback;

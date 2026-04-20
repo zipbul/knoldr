@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 import { callLlm, extractJson } from "./cli";
+import { loadWithDeviceFallback } from "./device";
 import { logger } from "../observability/logger";
 
 // Two NLI models, routed by claim language:
@@ -54,9 +55,12 @@ async function getHandles(modelId: string): Promise<CachedHandles> {
       "@huggingface/transformers"
     );
     const tokenizer = await AutoTokenizer.from_pretrained(modelId);
-    const model = await AutoModelForSequenceClassification.from_pretrained(modelId, {
-      dtype: "q8",
-    });
+    const model = await loadWithDeviceFallback(modelId, (device) =>
+      AutoModelForSequenceClassification.from_pretrained(modelId, {
+        dtype: "q8",
+        device,
+      } as unknown as Record<string, unknown>),
+    );
     const handles: CachedHandles = {
       tokenizer,
       model,

@@ -1,3 +1,4 @@
+import { loadWithDeviceFallback } from "./device";
 import { logger } from "../observability/logger";
 
 // Cross-encoder reranker. Embedding-based cosine ranking is fast but
@@ -31,9 +32,12 @@ async function getHandles(): Promise<CachedReranker> {
       "@huggingface/transformers"
     );
     const tokenizer = await AutoTokenizer.from_pretrained(RERANKER_MODEL);
-    const model = await AutoModelForSequenceClassification.from_pretrained(RERANKER_MODEL, {
-      dtype: "q8",
-    });
+    const model = await loadWithDeviceFallback(RERANKER_MODEL, (device) =>
+      AutoModelForSequenceClassification.from_pretrained(RERANKER_MODEL, {
+        dtype: "q8",
+        device,
+      } as unknown as Record<string, unknown>),
+    );
     cached = { tokenizer, model };
     logger.info({ model: RERANKER_MODEL }, "reranker model loaded");
     return cached;

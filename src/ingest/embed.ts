@@ -1,4 +1,5 @@
 import { logger } from "../observability/logger";
+import { loadWithDeviceFallback } from "../llm/device";
 
 const MAX_TOKENS = 256; // all-MiniLM-L6-v2 max token limit
 const EMBEDDING_DIM = 384;
@@ -19,9 +20,14 @@ let pipelineInstance: ((text: string, opts?: Record<string, unknown>) => Promise
 async function getPipeline() {
   if (!pipelineInstance) {
     const { pipeline } = await import("@huggingface/transformers");
-    pipelineInstance = (await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
-      dtype: "q8",
-    })) as unknown as typeof pipelineInstance;
+    pipelineInstance = (await loadWithDeviceFallback(
+      "all-MiniLM-L6-v2",
+      (device) =>
+        pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+          dtype: "q8",
+          device,
+        } as unknown as Record<string, unknown>),
+    )) as unknown as typeof pipelineInstance;
     logger.info("local embedding model loaded: all-MiniLM-L6-v2 (384dim, q8)");
   }
   return pipelineInstance!;

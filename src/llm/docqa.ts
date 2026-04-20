@@ -1,6 +1,7 @@
 import { logger } from "../observability/logger";
 import { z } from "zod/v4";
 import { callLlm, extractJson } from "./cli";
+import { loadWithDeviceFallback } from "./device";
 
 // Question-Answering verifier (DocQA).
 //
@@ -26,7 +27,12 @@ async function getQaPipeline() {
   if (loadingQa) return loadingQa;
   loadingQa = (async () => {
     const { pipeline } = await import("@huggingface/transformers");
-    qaPipeline = (await pipeline("question-answering", QA_MODEL, { dtype: "q8" })) as unknown as typeof qaPipeline;
+    qaPipeline = (await loadWithDeviceFallback(QA_MODEL, (device) =>
+      pipeline("question-answering", QA_MODEL, {
+        dtype: "q8",
+        device,
+      } as unknown as Record<string, unknown>),
+    )) as unknown as typeof qaPipeline;
     logger.info({ model: QA_MODEL }, "QA model loaded");
     return qaPipeline;
   })();

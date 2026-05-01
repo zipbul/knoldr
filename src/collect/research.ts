@@ -102,14 +102,41 @@ export async function research(
       continue;
     }
 
-    const sourceType = estimateSourceType(hit.url);
-    const chunks = splitText(hit.content || hit.title);
+    // Host allowlist gate (opt-in). When KNOLDR_HOST_ALLOWLIST is set,
+    // only hits whose host (or parent domain) appears in the list are
+    // ingested; everything else is dropped before any further work.
+    // Empty/unset = accept-all. Blocklist takes precedence over
+    // allowlist when both are configured.
+    if (!hostPasses(hit.url)) {
+      result.entriesSkippedLowRelevance++;
+      continue;
+    }
+
+    // Normalize LangSearch tokenizer format ("json schema . 2" →
+    // "json schema. 2"). The upstream extractor wraps every punctuation
+    // glyph in whitespace; collapsing this back is required for clean
+    // embeddings, grounders, and titles. Applied to all hits because the
+    // format is uniform across sources.
+    const normalized = normalizeTokenizerSpacing(hit.content || "");
+
+    // Reject only after normalization, against semantic markers — a hit
+    // is garbage when there's almost no alphanumeric prose (file
+    // listings, code-only fragments) or no sentence structure.
+    if (isSemanticGarbage(normalized)) {
+      result.entriesSkippedLowRelevance++;
+      logger.warn({ url: hit.url }, "rejected: semantic garbage content");
+      continue;
+    }
+    const cleanedHit = { ...hit, content: normalized };
+
+    const sourceType = estimateSourceType(cleanedHit.url);
+    const chunks = splitText(cleanedHit.content || cleanedHit.title);
 
     if (chunks.length === 0) {
       allChunks.push({
-        title: hit.title.slice(0, TITLE_MAX),
-        text: hit.content || hit.title,
-        url: hit.url,
+        title: cleanedHit.title.slice(0, TITLE_MAX),
+        text: cleanedHit.content || cleanedHit.title,
+        url: cleanedHit.url,
         sourceType,
       });
     } else {
@@ -117,7 +144,7 @@ export async function research(
         allChunks.push({
           title: deriveTitle(chunk.text).slice(0, TITLE_MAX),
           text: chunk.text,
-          url: hit.url,
+          url: cleanedHit.url,
           sourceType,
         });
       }
@@ -223,6 +250,32 @@ export async function research(
   return result;
 }
 
+// Host allowlist / blocklist. Domain match accepts an exact host or
+// any subdomain. Empty allowlist = accept-all. Blocklist always wins.
+const parseHostList = (raw: string | undefined): string[] =>
+  (raw ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase().replace(/^www\./, ""))
+    .filter(Boolean);
+export function hostPasses(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return false;
+  }
+  const block = parseHostList(process.env.KNOLDR_HOST_BLOCKLIST);
+  for (const b of block) {
+    if (host === b || host.endsWith(`.${b}`)) return false;
+  }
+  const allow = parseHostList(process.env.KNOLDR_HOST_ALLOWLIST);
+  if (allow.length === 0) return true;
+  for (const a of allow) {
+    if (host === a || host.endsWith(`.${a}`)) return true;
+  }
+  return false;
+}
+
 function passesTopicGate(hit: SearchHit, topicTerms: string[]): boolean {
   if (topicTerms.length === 0) return true;
   const haystack = `${hit.title} ${hit.content}`.toLowerCase();
@@ -230,23 +283,138 @@ function passesTopicGate(hit: SearchHit, topicTerms: string[]): boolean {
   return matched / topicTerms.length >= MIN_TOPIC_COVERAGE;
 }
 
-function estimateSourceType(url: string): string {
+// LangSearch wraps every punctuation glyph in whitespace ("json schema
+// . 2"). This is uniform across all sources — measured in DB at 1.85-4%
+// ratio for both legitimate arxiv prose and fragmented code dumps —
+// so the spacing alone can't gate. We collapse the spacing back to the
+// canonical form before any downstream embedding / grounding sees it.
+// Two-pass normalizer:
+//   (1) closing-punct rule: "x . y" → "x. y", "x )" → "x)"
+//       Match whitespace BEFORE punctuation regardless of what follows.
+//   (2) opening-punct rule: "( x" → "(x"
+//       Match whitespace AFTER punctuation regardless of what precedes.
+//   (3) collapse leftover runs.
+const TOKENIZER_PUNCT_RE = /\s+([.,;:!?)\]}'"])/g;
+const TOKENIZER_OPEN_RE = /([(\[{])\s+/g;
+export function normalizeTokenizerSpacing(text: string): string {
+  return text
+    .replace(TOKENIZER_PUNCT_RE, "$1")
+    .replace(TOKENIZER_OPEN_RE, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Conservative reject — only blocks extreme cases (code-heavy dumps,
+// large unstructured listings). Tuned to minimize false positives over
+// recall; downstream verify pipeline + retrieval ranking handle the
+// gray area. Thresholds are ENV-overridable so we can tighten after
+// observing production data.
+//
+// Alpha range covers Latin, Hangul (AC00-D7AF), CJK Unified (4E00-9FFF),
+// CJK Extension A (3400-4DBF), Hiragana (3040-309F), Katakana (30A0-30FF).
+// Initial range was Latin+Hangul only and falsely flagged Chinese /
+// Japanese passages as low-alpha garbage in production samples.
+const ALPHA_RE =
+  /[A-Za-z\u3040-\u309F\u30A0-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF]/g;
+const SENTENCE_END_RE = /[.!?。!?]/g;
+const GARBAGE_MIN_ALPHA = Number(process.env.KNOLDR_GARBAGE_MIN_ALPHA ?? 0.4);
+const GARBAGE_NO_SENT_LEN = Number(
+  process.env.KNOLDR_GARBAGE_NO_SENT_LEN ?? 600,
+);
+export function isSemanticGarbage(text: string): boolean {
+  if (text.length < 200) return false;
+  const alphaCount = (text.match(ALPHA_RE) ?? []).length;
+  if (alphaCount / text.length < GARBAGE_MIN_ALPHA) return true;
+  const sentenceCount = (text.match(SENTENCE_END_RE) ?? []).length;
+  if (sentenceCount === 0 && text.length > GARBAGE_NO_SENT_LEN) return true;
+  return false;
+}
+
+export function estimateSourceType(url: string): string {
   // Host-based matching so paths like /evil/fake-github.com/... can't
-  // impersonate a trusted publisher. `hostMatches` accepts an exact
-  // host or any subdomain of it.
+  // impersonate a trusted publisher. The `is()` helper accepts an exact
+  // host or any subdomain of it. Path-aware refinements (GitHub
+  // README/issue/release distinction) handled below for the cases that
+  // actually skew downstream verify weighting.
   let host: string;
+  let pathname: string;
   try {
-    host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+    const u = new URL(url);
+    host = u.hostname.toLowerCase().replace(/^www\./, "");
+    pathname = u.pathname.toLowerCase();
   } catch {
     return "unknown";
   }
   const is = (...domains: string[]) =>
     domains.some((d) => host === d || host.endsWith(`.${d}`));
 
-  if (is("github.com")) return "github_release";
-  if (is("arxiv.org")) return "research_paper";
+  // Research papers
+  if (is("arxiv.org", "arxiv-vanity.com", "ar5iv.labs.arxiv.org")) return "research_paper";
+  if (is("openreview.net", "aclanthology.org", "papers.nips.cc", "proceedings.mlr.press")) {
+    return "research_paper";
+  }
+  if (is("biorxiv.org", "medrxiv.org", "ssrn.com")) return "research_paper";
+
+  // Official docs (vendor / language / framework)
+  if (
+    is(
+      "learn.microsoft.com",
+      "docs.microsoft.com",
+      "developer.mozilla.org",
+      "docs.python.org",
+      "pytorch.org",
+      "tensorflow.org",
+      "huggingface.co",
+      "platform.openai.com",
+      "platform.claude.com",
+      "docs.anthropic.com",
+      "ai.google.dev",
+      "cloud.google.com",
+      "docs.aws.amazon.com",
+      "kubernetes.io",
+      "rust-lang.org",
+      "doc.rust-lang.org",
+      "crates.io",
+      "go.dev",
+      "pkg.go.dev",
+      "nodejs.org",
+      "bun.sh",
+      "deno.land",
+      "docs.deno.com",
+      "postgresql.org",
+      "redis.io",
+    )
+  ) {
+    return "official_docs";
+  }
   if (host.endsWith(".gov") || host.endsWith(".edu")) return "official_docs";
-  if (is("medium.com", "dev.to")) return "established_blog";
-  if (is("stackoverflow.com", "reddit.com")) return "community_forum";
+  if (is("pypi.org", "npmjs.com")) return "official_docs";
+
+  // Reference / encyclopedia
+  if (is("wikipedia.org", "en.wikipedia.org") || /\.wikipedia\.org$/.test(host)) {
+    return "reference_wiki";
+  }
+  if (is("wikidata.org", "handwiki.org", "scholarpedia.org")) return "reference_wiki";
+
+  // GitHub: differentiate by URL shape — README/blob is documentation,
+  // issues/discussions are community forum, releases are versioned
+  // artifacts. Coarse-grained but better than blanket `github_release`.
+  if (is("github.com")) {
+    if (/\/(issues|discussions|pull)(\/|$)/.test(pathname)) return "community_forum";
+    if (/\/releases(\/|$)/.test(pathname)) return "github_release";
+    if (/\/(blob|tree|wiki)\//.test(pathname)) return "official_docs";
+    return "github_release";
+  }
+  if (is("gitlab.com", "bitbucket.org")) return "github_release";
+
+  // Established blogs / publishers
+  if (is("medium.com", "dev.to", "substack.com", "hashnode.dev")) return "established_blog";
+  if (is("blog.csdn.net", "qiita.com", "zenn.dev")) return "established_blog";
+
+  // Community forums
+  if (is("stackoverflow.com", "stackexchange.com", "reddit.com", "news.ycombinator.com")) {
+    return "community_forum";
+  }
+
   return "unknown";
 }

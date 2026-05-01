@@ -182,6 +182,24 @@ async function migrate() {
   await sql`CREATE INDEX IF NOT EXISTS idx_claim_drift ON claim(last_drift_check_at NULLS FIRST) WHERE verdict IN ('verified', 'disputed')`;
 
   // ============================================================
+  // verdict_log — append-only history of every verdict change
+  // ============================================================
+  await sql`
+    CREATE TABLE IF NOT EXISTS verdict_log (
+      id TEXT PRIMARY KEY,
+      claim_id TEXT NOT NULL REFERENCES claim(id) ON DELETE CASCADE,
+      verdict TEXT NOT NULL CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not_applicable')),
+      certainty DOUBLE PRECISION NOT NULL CHECK (certainty >= 0 AND certainty <= 1),
+      evidence_source TEXT,
+      grounder_model TEXT,
+      trigger TEXT NOT NULL CHECK (trigger IN ('auto', 'feedback', 'drift', 'reverify', 'cove', 'manual')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_verdict_log_claim ON verdict_log(claim_id, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_verdict_log_created ON verdict_log(created_at DESC)`;
+
+  // ============================================================
   // verify_queue (v0.3)
   // ============================================================
   await sql`

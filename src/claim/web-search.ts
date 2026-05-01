@@ -17,7 +17,7 @@ export interface WebSearchResult {
  * Search the web for evidence about a claim. Returns up to N URLs
  * sorted by SearXNG's internal score (which factors in source
  * authority + result freshness + multi-engine agreement). Empty
- * array on failure — caller should fall back to llm_jury.
+ * array on failure — caller commits unverified via exhausted_pipeline.
  *
  * The query is the claim text verbatim. SearXNG reformulates as
  * needed via its language detection; passing a manually rewritten

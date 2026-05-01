@@ -209,21 +209,41 @@ def unload_ollama_models() -> None:
         print(f"ollama unload skipped: {e}")
 
 
+FT_LOCK_KEY = 0x6B6E6F6C64720001  # 'knoldr\x00\x01' as int64 — namespace for ft job
+
 def train_once() -> int:
     print(f"[{datetime.now(timezone.utc).isoformat()}] knoldr-finetune cycle start")
+    # Acquire an exclusive postgres advisory lock that blocks the verify
+    # worker (which acquires a SHARED lock on the same key before each
+    # batch) from running while training is in flight. Held across the
+    # whole cycle — model load, training, GGUF export, Ollama register —
+    # so verify never tries to reach an Ollama that's mid-unload.
     with psycopg.connect(DATABASE_URL) as conn:
-        examples, counts = pull_dataset(conn)
-    total = len(examples)
-    print(f"pulled {total} examples across tasks: {counts}")
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (FT_LOCK_KEY,))
+            got = cur.fetchone()[0]
+        if not got:
+            print("could not acquire ft-active lock (another cycle running?); skipping")
+            return 0
+        try:
+            examples, counts = pull_dataset(conn)
+            total = len(examples)
+            print(f"pulled {total} examples across tasks: {counts}")
 
-    if total < MIN_SAMPLES:
-        print(f"insufficient samples ({total} < {MIN_SAMPLES}); skipping")
-        return 0
+            if total < MIN_SAMPLES:
+                print(f"insufficient samples ({total} < {MIN_SAMPLES}); skipping")
+                return 0
 
-    # Free GPU before allocating ~6GB for 4-bit Gemma + LoRA. Ollama
-    # auto-reloads on next inference request after training finishes.
-    unload_ollama_models()
+            # Free GPU before allocating ~6GB for 4-bit Gemma + LoRA. Ollama
+            # auto-reloads on next inference request after training finishes.
+            unload_ollama_models()
+            return _do_train(examples)
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (FT_LOCK_KEY,))
 
+
+def _do_train(examples: list[str]) -> int:
     # Lazy-import unsloth so the container can boot for inspection
     # even on hosts without GPU drivers exposed.
     from unsloth import FastLanguageModel
@@ -231,9 +251,14 @@ def train_once() -> int:
     from trl import SFTTrainer
     from transformers import TrainingArguments
 
+    # max_seq_length=2048 + bsz=2 left ~4 GB for fused-CE on a 16 GB
+    # 4080, which unsloth flags as "negligible". Our prompts are
+    # claim+source pairs (~300-800 tokens), so 1024 covers them and
+    # halves the activation memory.
+    max_seq = int(os.environ.get("KNOLDR_FT_MAX_SEQ", "1024"))
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=BASE_MODEL,
-        max_seq_length=2048,
+        max_seq_length=max_seq,
         load_in_4bit=True,
     )
     model = FastLanguageModel.get_peft_model(
@@ -253,11 +278,15 @@ def train_once() -> int:
         tokenizer=tokenizer,
         train_dataset=ds,
         dataset_text_field="text",
-        max_seq_length=2048,
+        max_seq_length=max_seq,
         args=TrainingArguments(
             output_dir=str(ADAPTER_OUT),
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=4,
+            # bsz=1 + grad_accum=8 keeps the effective batch at 8 while
+            # roughly halving the per-step activation footprint vs
+            # bsz=2. Fits the 16 GB 4080 alongside the 4-bit Gemma 4
+            # weights (~6 GB) with margin for fused cross-entropy.
+            per_device_train_batch_size=int(os.environ.get("KNOLDR_FT_BSZ", "1")),
+            gradient_accumulation_steps=int(os.environ.get("KNOLDR_FT_GRAD_ACCUM", "8")),
             warmup_steps=10,
             max_steps=MAX_STEPS,
             learning_rate=2e-4,
@@ -294,6 +323,18 @@ def main() -> int:
         f"min_samples={MIN_SAMPLES}, recheck={SLEEP_BETWEEN_CHECKS_S}s"
     )
     last_train = 0.0
+    # Force-now path: when KNOLDR_FT_FORCE_NOW=1 we run a single cycle
+    # immediately on boot, regardless of INTERVAL_HOURS or last_train.
+    # This is the bring-up / smoke-test entry: confirms DB, GPU,
+    # unsloth, GGUF export, and Ollama registration end-to-end. Cleared
+    # after one execution so a restart loop doesn't retrain forever.
+    if os.environ.get("KNOLDR_FT_FORCE_NOW") == "1":
+        print("KNOLDR_FT_FORCE_NOW=1 — running one cycle immediately")
+        try:
+            train_once()
+        except Exception as e:
+            print(f"forced train_once failed: {type(e).__name__}: {e}")
+        last_train = time.time()
     while True:
         now = time.time()
         if now - last_train >= INTERVAL_HOURS * 3600:

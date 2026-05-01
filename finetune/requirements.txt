@@ -1,6 +1,11 @@
 psycopg[binary]==3.2.3
-unsloth==2026.1.4
-transformers>=4.46
+# unsloth 2026.1.4 capped transformers at 4.57.6, which predates the
+# Gemma 4 architecture (released 2026-04-02) and rejects
+# unsloth/gemma-4-e4b-it-unsloth-bnb-4bit. 2026.4.x adds Gemma 4 support
+# and lifts the cap. Let pip resolve transformers within the unsloth
+# pin range.
+unsloth>=2026.4.0
+transformers
 datasets>=3.0
 peft>=0.13
 trl>=0.12

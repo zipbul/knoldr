@@ -250,6 +250,47 @@ export const claim = pgTable(
 );
 
 // ============================================================
+// verdict_log — Append-only audit of every verdict assignment.
+// claim.verdict / claim.certainty hold the latest value for fast
+// querying; verdict_log preserves the full history with the model
+// version that produced each verdict and the trigger ('auto' from a
+// scheduled verify, 'feedback' from agent re-verify, 'drift' from
+// the periodic re-check). History never overwrites — it only inserts.
+// ============================================================
+export const verdictLog = pgTable(
+  "verdict_log",
+  {
+    id: text("id").primaryKey(),
+    claimId: text("claim_id").notNull(),
+    verdict: text("verdict").notNull(),
+    certainty: doublePrecision("certainty").notNull(),
+    evidenceSource: text("evidence_source"),
+    grounderModel: text("grounder_model"),
+    trigger: text("trigger").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.claimId],
+      foreignColumns: [claim.id],
+    }).onDelete("cascade"),
+    check(
+      "verdict_log_verdict_values",
+      sql`${t.verdict} IN ('verified', 'disputed', 'unverified', 'not_applicable')`,
+    ),
+    check("verdict_log_certainty_range", sql`${t.certainty} >= 0 AND ${t.certainty} <= 1`),
+    check(
+      "verdict_log_trigger_values",
+      sql`${t.trigger} IN ('auto', 'feedback', 'drift', 'reverify', 'cove', 'manual')`,
+    ),
+    index("idx_verdict_log_claim").on(t.claimId, t.createdAt.desc()),
+    index("idx_verdict_log_created").on(t.createdAt.desc()),
+  ],
+);
+
+// ============================================================
 // verify_queue — Factual claims awaiting Pyreez verification
 // ============================================================
 export const verifyQueue = pgTable(

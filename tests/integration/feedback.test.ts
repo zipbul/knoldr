@@ -189,3 +189,85 @@ describe("Feedback — audit log", () => {
     expect(logs[0]!.agent_id).toBe("agent-log");
   });
 });
+
+describe("Feedback — structured-reason routing", () => {
+  let routeFeedbackAction: typeof import("../../src/score/feedback-router").routeFeedbackAction;
+  let routerLoaded = false;
+
+  beforeAll(async () => {
+    if (!dbAvailable) return;
+    const mod = await import("../../src/score/feedback-router");
+    routeFeedbackAction = mod.routeFeedbackAction;
+    routerLoaded = true;
+  });
+
+  async function createEntryWithClaim(): Promise<{ entryId: string; claimId: string }> {
+    const entryId = await createTestEntry();
+    const sql = getTestClient();
+    const [entryRow] = await sql`SELECT created_at FROM entry WHERE id = ${entryId}`;
+    if (!entryRow) throw new Error("entry not found");
+    const claimId = `01TEST${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`.padEnd(26, "X").slice(0, 26);
+    // Embedding column requires vector(384); use zero-padded literal.
+    const zeroVec = `[${new Array(384).fill(0).join(",")}]`;
+    await sql`
+      INSERT INTO claim (id, entry_id, entry_created_at, statement, type, verdict, certainty, embedding, created_at)
+      VALUES (${claimId}, ${entryId}, ${entryRow.created_at as Date}, 'test claim', 'factual', 'unverified', 0.5, ${zeroVec}::vector, NOW())
+    `;
+    return { entryId, claimId };
+  }
+
+  test("wrong reason re-queues claims with high priority", async () => {
+    if (!dbAvailable || !routerLoaded) return;
+    const { entryId, claimId } = await createEntryWithClaim();
+
+    await routeFeedbackAction({
+      entryId,
+      reason: "wrong",
+      agentId: "agent-route",
+    });
+
+    const sql = getTestClient();
+    const [vq] = await sql`
+      SELECT priority, attempts FROM verify_queue WHERE claim_id = ${claimId}
+    `;
+    expect(vq).toBeDefined();
+    expect(Number(vq!.priority)).toBeGreaterThanOrEqual(100);
+    expect(Number(vq!.attempts)).toBe(0);
+  });
+
+  test("outdated reason marks entry metadata + bumps verify_queue", async () => {
+    if (!dbAvailable || !routerLoaded) return;
+    const { entryId, claimId } = await createEntryWithClaim();
+
+    await routeFeedbackAction({
+      entryId,
+      reason: "outdated",
+      agentId: "agent-route",
+    });
+
+    const sql = getTestClient();
+    const [entryRow] = await sql`SELECT metadata FROM entry WHERE id = ${entryId}`;
+    expect(entryRow).toBeDefined();
+    const md = entryRow!.metadata as Record<string, unknown> | null;
+    expect(md).toBeTruthy();
+    expect(md!.outdated_at).toBeDefined();
+
+    const [vq] = await sql`
+      SELECT priority FROM verify_queue WHERE claim_id = ${claimId}
+    `;
+    expect(vq).toBeDefined();
+    expect(Number(vq!.priority)).toBeGreaterThanOrEqual(100);
+  });
+
+  test("missing/used/helpful/irrelevant reasons no-op on routing", async () => {
+    if (!dbAvailable || !routerLoaded) return;
+    const { entryId, claimId } = await createEntryWithClaim();
+    const sql = getTestClient();
+
+    for (const reason of ["missing", "used", "helpful", "irrelevant", "other"] as const) {
+      await routeFeedbackAction({ entryId, reason, agentId: "agent-route" });
+    }
+    const vq = await sql`SELECT * FROM verify_queue WHERE claim_id = ${claimId}`;
+    expect(vq).toHaveLength(0);
+  });
+});

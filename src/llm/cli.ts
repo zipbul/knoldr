@@ -29,21 +29,62 @@ interface LlmTarget {
 // Env is read at call time (not module load) so tests / hot-reload
 // paths can redirect OLLAMA_HOST without re-importing.
 const ollamaHost = () => process.env.OLLAMA_HOST ?? "http://localhost:11434";
-const fastModel = () => process.env.KNOLDR_OLLAMA_FAST_MODEL ?? "gemma4:e4b";
-const juryModels = () =>
-  (process.env.KNOLDR_OLLAMA_JURY_MODELS ?? "gemma4:e4b,qwen2.5:14b")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+const baseFastModel = () =>
+  process.env.KNOLDR_OLLAMA_FAST_MODEL ?? "gemma4:e4b";
 const ollamaTimeoutMs = () =>
   Number(process.env.KNOLDR_OLLAMA_TIMEOUT_MS ?? 120_000);
 
-function getFastTargets(): LlmTarget[] {
-  return [{ name: `ollama:${fastModel()}`, model: fastModel() }];
+// Auto-pointer to the latest finetune output. The finetune loop registers
+// new adapters as `knoldr-judge:vYYYYMMDD-HHMM` after each successful
+// training cycle; the verify pipeline should pick up the freshest one
+// without a manual env edit. We list Ollama's tags, pick the highest
+// versioned `knoldr-judge:*` tag, and fall back to the configured base
+// (gemma4:e4b) when none exist.
+//
+// The lookup is cached for 60 s — `getFastTargets` is called many times
+// per batch, so a per-call HTTP probe would dominate latency. The cache
+// is invalidated on lookup error so a transient Ollama hiccup doesn't
+// freeze the pointer at a stale value.
+const FAST_MODEL_TTL_MS = 60_000;
+let cachedFastModel: { model: string; expires: number } | null = null;
+
+async function resolveFastModel(): Promise<string> {
+  const now = Date.now();
+  if (cachedFastModel && cachedFastModel.expires > now) return cachedFastModel.model;
+  const fallback = baseFastModel();
+  // Allow opt-out: if the operator pinned KNOLDR_OLLAMA_FAST_MODEL_PIN=1
+  // the auto-pointer is bypassed and the env value wins unconditionally.
+  if (process.env.KNOLDR_OLLAMA_FAST_MODEL_PIN === "1") {
+    cachedFastModel = { model: fallback, expires: now + FAST_MODEL_TTL_MS };
+    return fallback;
+  }
+  try {
+    const res = await fetch(`${ollamaHost()}/api/tags`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as { models?: Array<{ name?: string }> };
+    const judgeTags = (json.models ?? [])
+      .map((m) => m.name ?? "")
+      .filter((n) => n.startsWith("knoldr-judge:"))
+      .sort()
+      .reverse();
+    const latest = judgeTags[0] ?? fallback;
+    cachedFastModel = { model: latest, expires: now + FAST_MODEL_TTL_MS };
+    if (latest !== fallback) {
+      logger.debug({ model: latest }, "fast model auto-resolved to knoldr-judge");
+    }
+    return latest;
+  } catch {
+    // Probe failed — don't cache the failure, so the next call retries.
+    cachedFastModel = null;
+    return fallback;
+  }
 }
 
-function getJuryTargets(): LlmTarget[] {
-  return juryModels().map((m) => ({ name: `ollama:${m}`, model: m }));
+async function getFastTargets(): Promise<LlmTarget[]> {
+  const m = await resolveFastModel();
+  return [{ name: `ollama:${m}`, model: m }];
 }
 
 // ---- Health circuit breaker ----
@@ -110,7 +151,7 @@ function recordSuccess(name: string): void {
  */
 export async function callLlm(prompt: PromptInput): Promise<string> {
   const structured = asStructured(prompt);
-  const targets = getFastTargets();
+  const targets = await getFastTargets();
   let lastError: Error | null = null;
 
   for (const t of targets) {
@@ -127,44 +168,6 @@ export async function callLlm(prompt: PromptInput): Promise<string> {
   }
 
   throw lastError ?? new Error("No healthy LLM target available");
-}
-
-export interface LlmVote {
-  cli: string;
-  output: string;
-}
-
-/**
- * Fan out to every healthy jury model in parallel. Used by claim
- * verification to collect diverse votes from KNOLDR_OLLAMA_JURY_MODELS
- * (expected 2+ distinct local models for architectural diversity).
- */
-export async function callAllLlms(prompt: PromptInput): Promise<LlmVote[]> {
-  const targets = getJuryTargets().filter((t) => isHealthy(t.name));
-  if (targets.length === 0) return [];
-
-  const structured = asStructured(prompt);
-  const settled = await Promise.allSettled(
-    targets.map(async (t) => {
-      const output = await callOllama(t.model, structured);
-      return { cli: t.name, output };
-    }),
-  );
-
-  const votes: LlmVote[] = [];
-  for (let i = 0; i < settled.length; i++) {
-    const result = settled[i]!;
-    const name = targets[i]!.name;
-    if (result.status === "fulfilled") {
-      recordSuccess(name);
-      votes.push(result.value);
-    } else {
-      const err = result.reason as Error;
-      recordFailure(name);
-      logger.warn({ model: name, error: err.message }, "jury model failed");
-    }
-  }
-  return votes;
 }
 
 async function callOllama(model: string, prompt: StructuredPrompt): Promise<string> {

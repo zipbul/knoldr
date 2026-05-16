@@ -1,31 +1,11 @@
-import { z } from "zod/v4";
-import { callLlm, extractJson } from "../llm/cli";
-import { nliScore } from "../llm/nli";
-import { logger } from "../observability/logger";
+import { z } from 'zod/v4';
 
-export const CLAIM_TYPES = ["factual", "subjective", "predictive", "normative"] as const;
-export type ClaimType = (typeof CLAIM_TYPES)[number];
+import { callLlm, extractJson } from '../llm/cli';
+import { nliScore } from '../llm/nli';
+import { logger } from '../observability/logger';
+import { ClaimType, Modality, Quantifier } from '../score/enums';
 
-export const MODALITY_VALUES = [
-  "asserted",
-  "hedged",
-  "possible",
-  "conditional",
-  "quoted",
-] as const;
-export type Modality = (typeof MODALITY_VALUES)[number];
-
-export const QUANTIFIER_VALUES = [
-  "universal",
-  "existential",
-  "majority",
-  "minority",
-  "specific",
-  "none",
-] as const;
-export type Quantifier = (typeof QUANTIFIER_VALUES)[number];
-
-export interface ExtractedClaim {
+interface ExtractedClaim {
   statement: string;
   type: ClaimType;
   // Verbatim source span the claim was extracted from. NULL only for
@@ -50,7 +30,7 @@ const claimSchema = z.object({
     .array(
       z.object({
         statement: z.string().min(1).max(2000),
-        type: z.enum(CLAIM_TYPES),
+        type: z.enum(ClaimType),
         // Required from the LLM; we validate presence here so a
         // malformed window-response fails fast and gets skipped by
         // the soft-fail handler below rather than poisoning the
@@ -61,9 +41,9 @@ const claimSchema = z.object({
         // be recovered downstream — better to drop the whole claim
         // and accept lower yield. The LLM prompt is explicit about
         // these being mandatory.
-        modality: z.enum(MODALITY_VALUES),
+        modality: z.enum(Modality),
         polarity: z.boolean(),
-        quantifier: z.enum(QUANTIFIER_VALUES),
+        quantifier: z.enum(Quantifier),
         valid_from: z.iso.datetime().optional(),
         valid_until: z.iso.datetime().optional(),
       }),
@@ -145,11 +125,11 @@ const GLOBAL_MAX_CLAIMS = 80;
 //
 // MIN_ENTAILMENT defaults to 0.5; calibration worker can override.
 const MIN_ENTAILMENT_DEFAULT = 0.5;
-const GATE_DISABLED = process.env.KNOLDR_EXTRACT_NLI_GATE === "off";
+const GATE_DISABLED = process.env.KNOLDR_EXTRACT_NLI_GATE === 'off';
 
 /** Whitespace-tolerant substring check. */
 function normalizeWhitespace(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
+  return s.replace(/\s+/g, ' ').trim();
 }
 
 // Quotes can run up to 4000 chars but the NLI tokenizer truncates
@@ -169,7 +149,9 @@ async function bestNliScoreOverWindows(
   const windows: string[] = [];
   for (let start = 0; start < quote.length; start += NLI_WINDOW_STRIDE) {
     windows.push(quote.slice(start, start + NLI_WINDOW_CHARS));
-    if (start + NLI_WINDOW_CHARS >= quote.length) break;
+    if (start + NLI_WINDOW_CHARS >= quote.length) {
+      break;
+    }
   }
   let best = { entailment: 0, neutral: 0, contradiction: 0 };
   let bestPick = -Infinity;
@@ -189,9 +171,13 @@ async function bestNliScoreOverWindows(
 }
 
 function quoteAppearsInSource(quote: string, sourceWindow: string): boolean {
-  if (!quote || quote.trim().length === 0) return false;
+  if (!quote || quote.trim().length === 0) {
+    return false;
+  }
   const nq = normalizeWhitespace(quote);
-  if (nq.length === 0) return false;
+  if (nq.length === 0) {
+    return false;
+  }
   const ns = normalizeWhitespace(sourceWindow);
   return ns.includes(nq);
 }
@@ -213,17 +199,16 @@ function quoteAppearsInSource(quote: string, sourceWindow: string): boolean {
  * either invented the fact or paraphrased loosely enough that the
  * quote no longer supports the assertion.
  */
-export async function extractClaims(
-  title: string,
-  content: string,
-): Promise<ExtractedClaim[]> {
+async function extractClaims(title: string, content: string): Promise<ExtractedClaim[]> {
   const text = `${title}\n\n${content}`;
   const windows = splitWindows(text, WINDOW_CHARS, WINDOW_OVERLAP);
 
   const seen = new Map<string, ExtractedClaim>();
   let droppedFabricatedQuote = 0;
   for (const w of windows) {
-    if (seen.size >= GLOBAL_MAX_CLAIMS) break;
+    if (seen.size >= GLOBAL_MAX_CLAIMS) {
+      break;
+    }
     try {
       const output = await callLlm({ system: SYSTEM_PROMPT, user: w });
       const raw = extractJson(output);
@@ -244,11 +229,13 @@ export async function extractClaims(
         // stored 3× the same assertion.
         const key = c.statement
           .toLowerCase()
-          .normalize("NFKC")
-          .replace(/[\p{P}\p{S}]+/gu, " ")
-          .replace(/\s+/g, " ")
+          .normalize('NFKC')
+          .replace(/[\p{P}\p{S}]+/gu, ' ')
+          .replace(/\s+/g, ' ')
           .trim();
-        if (key.length < 8) continue;
+        if (key.length < 8) {
+          continue;
+        }
         if (!seen.has(key)) {
           seen.set(key, {
             statement: c.statement,
@@ -261,16 +248,15 @@ export async function extractClaims(
             validUntil: c.valid_until,
           });
         }
-        if (seen.size >= GLOBAL_MAX_CLAIMS) break;
+        if (seen.size >= GLOBAL_MAX_CLAIMS) {
+          break;
+        }
       }
     } catch (err) {
       // Soft-fail per window; the dedupe path lets other windows
       // still contribute. Log at warn so a fully-failing entry is
       // visible without spamming on per-window noise.
-      logger.warn(
-        { error: (err as Error).message, windowChars: w.length },
-        "claim extraction window failed",
-      );
+      logger.warn({ error: (err as Error).message, windowChars: w.length }, 'claim extraction window failed');
     }
   }
 
@@ -278,10 +264,12 @@ export async function extractClaims(
   if (droppedFabricatedQuote > 0) {
     logger.info(
       { droppedFabricatedQuote, totalKept: merged.length },
-      "claims dropped because their quote was not a verbatim substring of the source window",
+      'claims dropped because their quote was not a verbatim substring of the source window',
     );
   }
-  if (GATE_DISABLED || merged.length === 0) return merged;
+  if (GATE_DISABLED || merged.length === 0) {
+    return merged;
+  }
   return gateBySourceEntailment(merged);
 }
 
@@ -308,26 +296,25 @@ const THRESHOLD_DB_TIMEOUT_MS = 500;
 
 async function getExtractGateThreshold(): Promise<number> {
   const env = process.env.KNOLDR_EXTRACT_NLI_THRESHOLD;
-  if (env !== undefined && env !== "") {
+  if (env !== undefined && env !== '') {
     const n = Number(env);
-    if (Number.isFinite(n)) return n;
+    if (Number.isFinite(n)) {
+      return n;
+    }
   }
   const now = Date.now();
   if (cachedThreshold && cachedThreshold.expiresAt > now) {
     return cachedThreshold.value;
   }
   try {
-    const { getCurrentThresholds } = await import("./calibration");
+    const { getCurrentThresholds } = await import('./calibration');
     const value = await Promise.race<number>([
       (async () => {
         const t = await getCurrentThresholds();
         return t.support ?? MIN_ENTAILMENT_DEFAULT;
       })(),
       new Promise<number>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("calibration read timed out")),
-          THRESHOLD_DB_TIMEOUT_MS,
-        ),
+        setTimeout(() => reject(new Error('calibration read timed out')), THRESHOLD_DB_TIMEOUT_MS),
       ),
     ]);
     cachedThreshold = { value, expiresAt: now + THRESHOLD_TTL_MS };
@@ -355,9 +342,7 @@ async function getExtractGateThreshold(): Promise<number> {
  * shouldn't be punished as a hallucination — the verify stage will
  * still scrutinize it downstream.
  */
-export async function gateBySourceEntailment(
-  claims: ExtractedClaim[],
-): Promise<ExtractedClaim[]> {
+async function gateBySourceEntailment(claims: ExtractedClaim[]): Promise<ExtractedClaim[]> {
   const kept: ExtractedClaim[] = [];
   let droppedQuoteMissing = 0;
   let droppedEntailmentLow = 0;
@@ -395,7 +380,7 @@ export async function gateBySourceEntailment(
             supportProb,
             opposeProb,
           },
-          "claim dropped: source quote opposes statement (polarity-aware)",
+          'claim dropped: source quote opposes statement (polarity-aware)',
         );
         continue;
       }
@@ -408,7 +393,7 @@ export async function gateBySourceEntailment(
             supportProb,
             threshold,
           },
-          "claim dropped: source quote does not support statement",
+          'claim dropped: source quote does not support statement',
         );
         continue;
       }
@@ -419,7 +404,7 @@ export async function gateBySourceEntailment(
       // hallucinations the NLI couldn't score here.
       logger.warn(
         { error: (err as Error).message, statement: c.statement.slice(0, 120) },
-        "source-entailment NLI failed — keeping claim",
+        'source-entailment NLI failed — keeping claim',
       );
       kept.push(c);
     }
@@ -436,21 +421,28 @@ export async function gateBySourceEntailment(
         nliErrors,
         threshold,
       },
-      "source-entailment gate complete",
+      'source-entailment gate complete',
     );
   }
   return kept;
 }
 
 function splitWindows(text: string, size: number, overlap: number): string[] {
-  if (text.length <= size) return [text];
+  if (text.length <= size) {
+    return [text];
+  }
   const out: string[] = [];
   let start = 0;
   while (start < text.length) {
     const end = Math.min(start + size, text.length);
     out.push(text.slice(start, end));
-    if (end === text.length) break;
+    if (end === text.length) {
+      break;
+    }
     start = end - overlap;
   }
   return out;
 }
+
+export { extractClaims, gateBySourceEntailment };
+export type { ExtractedClaim };

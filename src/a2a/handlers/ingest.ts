@@ -22,11 +22,13 @@
 // rejected, with reason. Duplicates short-circuit early so re-
 // submitting the same content is cheap.
 
-import { z } from "zod";
-import { ingest } from "../../ingest/engine";
-import { parseStoreInput } from "../../ingest/validate";
-import type { IngestResult } from "../../ingest/engine";
-import { logger } from "../../observability/logger";
+import { z } from 'zod';
+
+import type { IngestResult } from '../../ingest/engine';
+
+import { ingest } from '../../ingest/engine';
+import { parseStoreInput } from '../../ingest/validate';
+import { logger } from '../../observability/logger';
 
 // Top-level zod gate just to bound the JSON payload size at the A2A
 // boundary; parseStoreInput re-validates with the precise discriminated
@@ -39,45 +41,43 @@ const envelopeSchema = z
     entries: z.array(z.unknown()).max(20).optional(),
     sources: z.array(z.unknown()).max(20).optional(),
   })
-  .refine((v) => v.raw !== undefined || v.entries !== undefined, {
+  .refine(v => v.raw !== undefined || v.entries !== undefined, {
     message: "ingest requires either 'raw' or 'entries'",
   });
 
-export type IngestSkillResult =
+type IngestSkillResult =
   | { ok: true; results: IngestResult[]; storedCount: number; duplicateCount: number; rejectedCount: number }
-  | { ok: false; error: "invalid_input" | "engine_error"; message: string };
+  | { ok: false; error: 'invalid_input' | 'engine_error'; message: string };
 
-export async function handleIngest(
-  input: Record<string, unknown>,
-): Promise<IngestSkillResult> {
+export async function handleIngest(input: Record<string, unknown>): Promise<IngestSkillResult> {
   try {
     envelopeSchema.parse(input);
   } catch (err) {
-    return { ok: false, error: "invalid_input", message: (err as Error).message };
+    return { ok: false, error: 'invalid_input', message: (err as Error).message };
   }
 
   let parsed: ReturnType<typeof parseStoreInput>;
   try {
     parsed = parseStoreInput(input);
   } catch (err) {
-    return { ok: false, error: "invalid_input", message: (err as Error).message };
+    return { ok: false, error: 'invalid_input', message: (err as Error).message };
   }
 
   let results: IngestResult[];
   try {
     results = await ingest(parsed);
   } catch (err) {
-    logger.error({ error: (err as Error).message }, "ingest skill engine failure");
+    logger.error({ error: (err as Error).message }, 'ingest skill engine failure');
     return {
       ok: false,
-      error: "engine_error",
+      error: 'engine_error',
       message: (err as Error).message,
     };
   }
 
-  const storedCount = results.filter((r) => r.action === "stored").length;
-  const duplicateCount = results.filter((r) => r.action === "duplicate").length;
-  const rejectedCount = results.filter((r) => r.action === "rejected").length;
+  const storedCount = results.filter(r => r.action === 'stored').length;
+  const duplicateCount = results.filter(r => r.action === 'duplicate').length;
+  const rejectedCount = results.filter(r => r.action === 'rejected').length;
 
   logger.info(
     {
@@ -86,7 +86,7 @@ export async function handleIngest(
       duplicate: duplicateCount,
       rejected: rejectedCount,
     },
-    "ingest skill completed",
+    'ingest skill completed',
   );
 
   return {

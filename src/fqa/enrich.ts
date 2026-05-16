@@ -24,30 +24,27 @@
 // use case. Reporters that want to add detail to their feedback
 // re-call `claim_feedback` in update mode.
 
-import { eq, sql } from "drizzle-orm";
-import { db } from "../db/connection";
-import { claim, claimFeedback } from "../db/schema";
-import {
-  inferFromAuditNote,
-  recomputeEvidenceStrength,
-} from "./enrichment-llm";
-import { logger } from "../observability/logger";
+import { eq, sql } from 'drizzle-orm';
 
-export interface EnrichmentReport {
+import { getDb } from '../db/connection';
+import { claim, claimFeedback } from '../db/schema';
+import { logger } from '../observability/logger';
+import { EnrichmentStatus, Outcome } from '../score/enums';
+import { inferFromAuditNote, recomputeEvidenceStrength } from './enrichment-llm';
+
+interface EnrichmentReport {
   feedbackId: string;
   enriched: boolean;
   fieldsInferred: string[];
-  finalEnrichmentStatus: string;
+  finalEnrichmentStatus: EnrichmentStatus;
   newEvidenceStrength: number;
 }
 
 const STRONG_ENOUGH = 0.8;
 const PULL_AUTHORITY_FLOOR = 0.5;
 
-export async function runEnrichment(
-  feedbackId: string,
-): Promise<EnrichmentReport | null> {
-  const [row] = await db
+async function runEnrichment(feedbackId: string): Promise<EnrichmentReport | null> {
+  const [row] = await getDb()
     .select({
       id: claimFeedback.id,
       claimId: claimFeedback.claimId,
@@ -70,33 +67,34 @@ export async function runEnrichment(
     .where(eq(claimFeedback.id, feedbackId))
     .limit(1);
 
-  if (!row) return null;
+  if (!row) {
+    return null;
+  }
 
   // Held outcomes are not enrichment targets — nothing to investigate.
-  if (row.outcome === "held") {
+  if (row.outcome === Outcome.Held) {
     return {
       feedbackId: row.id,
       enriched: false,
       fieldsInferred: [],
-      finalEnrichmentStatus: "not-needed",
+      finalEnrichmentStatus: EnrichmentStatus.NotNeeded,
       newEvidenceStrength: 0,
     };
   }
 
-  const [claimRow] = await db
+  const [claimRow] = await getDb()
     .select({ statement: claim.statement, authority: claim.authority })
     .from(claim)
     .where(eq(claim.id, row.claimId))
     .limit(1);
 
-  const claimStatement = claimRow?.statement ?? "";
+  const claimStatement = claimRow?.statement ?? '';
   const claimAuthority = claimRow?.authority ?? 0;
 
   // Only run LLM if there's audit text AND at least one inferred
   // slot is empty. Avoids re-burning tokens on already-enriched
   // rows that the caller may invoke again.
-  const inferredSlotsEmpty =
-    !row.failureDimensionInferred || !row.counterSourceUrlInferred || row.partialTruthInferred === null;
+  const inferredSlotsEmpty = !row.failureDimensionInferred || !row.counterSourceUrlInferred || row.partialTruthInferred === null;
   const fieldsInferred: string[] = [];
   let inferredFailureDim = row.failureDimensionInferred;
   let inferredPartial = row.partialTruthInferred;
@@ -111,15 +109,15 @@ export async function runEnrichment(
       now = new Date();
       if (!inferredFailureDim && inferred.failureDimension) {
         inferredFailureDim = inferred.failureDimension;
-        fieldsInferred.push("failureDimension");
+        fieldsInferred.push('failureDimension');
       }
       if (inferredPartial === null && inferred.partialTruth !== null) {
         inferredPartial = inferred.partialTruth;
-        fieldsInferred.push("partialTruth");
+        fieldsInferred.push('partialTruth');
       }
       if (!inferredUrl && inferred.counterSourceUrl) {
         inferredUrl = inferred.counterSourceUrl;
-        fieldsInferred.push("counterSourceUrl");
+        fieldsInferred.push('counterSourceUrl');
       }
     }
   }
@@ -132,10 +130,7 @@ export async function runEnrichment(
     failureDimension: row.failureDimension,
     failureDimensionInferred: inferredFailureDim,
     contextDomain: row.contextDomain,
-    contextScope:
-      row.contextScope && typeof row.contextScope === "object"
-        ? (row.contextScope as Record<string, unknown>)
-        : null,
+    contextScope: row.contextScope && typeof row.contextScope === 'object' ? (row.contextScope as Record<string, unknown>) : null,
     partialTruth: row.partialTruth,
     partialTruthInferred: inferredPartial,
   });
@@ -146,19 +141,16 @@ export async function runEnrichment(
   // we'll wait for the reporter to re-submit via `claim_feedback`
   // update mode). The actual transition out of `awaiting_pull`
   // happens when the reporter calls back, not from here.
-  let finalStatus: string;
+  let finalStatus: EnrichmentStatus;
   if (newStrength >= STRONG_ENOUGH) {
-    finalStatus = "finalized-inferred";
-  } else if (
-    claimAuthority >= PULL_AUTHORITY_FLOOR &&
-    (row.outcome === "failed" || row.outcome === "partial")
-  ) {
-    finalStatus = "awaiting-pull";
+    finalStatus = EnrichmentStatus.FinalizedInferred;
+  } else if (claimAuthority >= PULL_AUTHORITY_FLOOR && (row.outcome === Outcome.Failed || row.outcome === Outcome.Partial)) {
+    finalStatus = EnrichmentStatus.AwaitingPull;
   } else {
-    finalStatus = "finalized-inferred";
+    finalStatus = EnrichmentStatus.FinalizedInferred;
   }
 
-  await db
+  await getDb()
     .update(claimFeedback)
     .set({
       failureDimensionInferred: inferredFailureDim,
@@ -167,7 +159,7 @@ export async function runEnrichment(
       ...(llmVersion && now
         ? {
             enrichedAt: now,
-            enrichedBy: "knoldr-fqa",
+            enrichedBy: 'knoldr-fqa',
             enrichmentLlmVersion: llmVersion,
           }
         : {}),
@@ -185,7 +177,7 @@ export async function runEnrichment(
       finalStatus,
       llmVersion,
     },
-    "fqa enrichment complete",
+    'fqa enrichment complete',
   );
 
   return {
@@ -208,21 +200,18 @@ export async function runEnrichment(
  * TTL is the same window `pending` enforces, so any task pull would
  * already have failed the deadline check.
  */
-export async function expireStalePullTasks(ttlHours = 24): Promise<number> {
+async function expireStalePullTasks(ttlHours = 24): Promise<number> {
   const cutoff = new Date(Date.now() - ttlHours * 3600 * 1000);
-  const result = await db
+  const result = await getDb()
     .update(claimFeedback)
-    .set({ enrichmentStatus: "expired-reporter-unavailable" })
+    .set({ enrichmentStatus: EnrichmentStatus.ExpiredReporterUnavailable })
     .where(
-      sql`${claimFeedback.enrichmentStatus} = 'awaiting-pull'
+      sql`${claimFeedback.enrichmentStatus} = ${EnrichmentStatus.AwaitingPull}
           AND ${claimFeedback.createdAt} < ${cutoff}`,
     )
     .returning({ id: claimFeedback.id });
   if (result.length > 0) {
-    logger.info(
-      { expired: result.length, ttlHours },
-      "fqa expired stale awaiting_pull tasks",
-    );
+    logger.info({ expired: result.length, ttlHours }, 'fqa expired stale awaiting_pull tasks');
   }
   return result.length;
 }
@@ -232,10 +221,7 @@ export async function expireStalePullTasks(ttlHours = 24): Promise<number> {
  * `runEnrichment` on each. Bounded by maxItems. Called by the
  * scheduled worker in `workers.ts`.
  */
-export async function auditAndEnrich(opts: {
-  timeWindowHours: number;
-  maxItems: number;
-}): Promise<{
+async function auditAndEnrich(opts: { timeWindowHours: number; maxItems: number }): Promise<{
   scanned: number;
   enriched: number;
   skipped: Array<{ reason: string; count: number }>;
@@ -247,7 +233,7 @@ export async function auditAndEnrich(opts: {
   // by claim_feedback, in the outcome group where enrichment is
   // meaningful. Previously hardcoded < 0.5 here orphaned every
   // [0.5, 0.8) pending row forever.
-  const rows = await db
+  const rows = await getDb()
     .select({
       id: claimFeedback.id,
       evidenceStrength: claimFeedback.evidenceStrength,
@@ -257,8 +243,8 @@ export async function auditAndEnrich(opts: {
     .where(
       sql`${claimFeedback.createdAt} >= ${cutoff}
         AND ${claimFeedback.evidenceStrength} < 0.8
-        AND ${claimFeedback.outcome} IN ('failed','partial')
-        AND ${claimFeedback.enrichmentStatus} IN ('pending','awaiting-pull')`,
+        AND ${claimFeedback.outcome} IN (${Outcome.Failed}, ${Outcome.Partial})
+        AND ${claimFeedback.enrichmentStatus} IN (${EnrichmentStatus.Pending}, ${EnrichmentStatus.AwaitingPull})`,
     )
     .orderBy(sql`${claimFeedback.evidenceStrength} ASC`)
     .limit(opts.maxItems);
@@ -269,7 +255,7 @@ export async function auditAndEnrich(opts: {
   for (const r of rows) {
     const result = await runEnrichment(r.id);
     if (!result) {
-      skipped.set("not_found", (skipped.get("not_found") ?? 0) + 1);
+      skipped.set('not_found', (skipped.get('not_found') ?? 0) + 1);
       continue;
     }
     if (result.enriched) {
@@ -286,3 +272,5 @@ export async function auditAndEnrich(opts: {
     skipped: Array.from(skipped, ([reason, count]) => ({ reason, count })),
   };
 }
+
+export { runEnrichment, expireStalePullTasks, auditAndEnrich };

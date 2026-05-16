@@ -5,9 +5,10 @@
 // filtered by relation_type. Uses a recursive CTE so a single
 // round-trip handles arbitrary hop counts within the cap.
 
-import { z } from "zod";
-import { sql } from "drizzle-orm";
-import { db } from "../../db/connection";
+import { sql } from 'drizzle-orm';
+import { z } from 'zod';
+
+import { getDb } from '../../db/connection';
 
 const MAX_HOPS = 4;
 const MAX_RESULTS = 200;
@@ -24,7 +25,7 @@ const inputSchema = z.object({
   limit: z.number().int().min(1).max(MAX_RESULTS).default(50),
 });
 
-export interface NeighborEntity {
+interface NeighborEntity {
   id: string;
   name: string;
   type: string;
@@ -32,23 +33,21 @@ export interface NeighborEntity {
   viaRelations: string[];
 }
 
-export type NeighborsResult =
+type NeighborsResult =
   | { ok: true; root: { id: string; name: string; type: string }; neighbors: NeighborEntity[] }
   | {
       ok: false;
-      error: "invalid_input" | "entity_not_found" | "ambiguous_entity";
+      error: 'invalid_input' | 'entity_not_found' | 'ambiguous_entity';
       message: string;
       candidates?: Array<{ id: string; name: string; type: string }>;
     };
 
-export async function handleNeighbors(
-  input: Record<string, unknown>,
-): Promise<NeighborsResult> {
+export async function handleNeighbors(input: Record<string, unknown>): Promise<NeighborsResult> {
   let validated: z.infer<typeof inputSchema>;
   try {
     validated = inputSchema.parse(input);
   } catch (err) {
-    return { ok: false, error: "invalid_input", message: (err as Error).message };
+    return { ok: false, error: 'invalid_input', message: (err as Error).message };
   }
 
   // Resolve the root by ULID or by case-insensitive name match. The
@@ -60,16 +59,18 @@ export async function handleNeighbors(
   //                entityType to disambiguate
   const looksLikeUlid = /^[0-9A-HJKMNP-TV-Z]{26}$/i.test(validated.entity);
   const matchRows = looksLikeUlid
-    ? ((await db.execute(
-        sql`SELECT id, name, type FROM entity WHERE id = ${validated.entity}`,
-      )) as unknown as Array<{ id: string; name: string; type: string }>)
+    ? ((await getDb().execute(sql`SELECT id, name, type FROM entity WHERE id = ${validated.entity}`)) as unknown as Array<{
+        id: string;
+        name: string;
+        type: string;
+      }>)
     : validated.entityType
-      ? ((await db.execute(
+      ? ((await getDb().execute(
           sql`SELECT id, name, type FROM entity
               WHERE lower(name) = lower(${validated.entity})
                 AND type = ${validated.entityType}`,
         )) as unknown as Array<{ id: string; name: string; type: string }>)
-      : ((await db.execute(
+      : ((await getDb().execute(
           sql`SELECT id, name, type FROM entity
               WHERE lower(name) = lower(${validated.entity})
               LIMIT 5`,
@@ -78,14 +79,14 @@ export async function handleNeighbors(
   if (matchRows.length === 0) {
     return {
       ok: false,
-      error: "entity_not_found",
+      error: 'entity_not_found',
       message: `no entity matches ${validated.entity}`,
     };
   }
   if (matchRows.length > 1) {
     return {
       ok: false,
-      error: "ambiguous_entity",
+      error: 'ambiguous_entity',
       message: `${matchRows.length} entities share name '${validated.entity}'; re-issue with entityType`,
       candidates: matchRows,
     };
@@ -95,11 +96,9 @@ export async function handleNeighbors(
   // Recursive walk. relation_type filter is optional; when omitted
   // the array_agg captures the path's relation labels so the caller
   // sees HOW the neighbor connects.
-  const typeFilter = validated.relationType
-    ? sql`AND relation_type = ${validated.relationType}`
-    : sql``;
+  const typeFilter = validated.relationType ? sql`AND relation_type = ${validated.relationType}` : sql``;
 
-  const rows = (await db.execute(sql`
+  const rows = (await getDb().execute(sql`
     WITH RECURSIVE walk(eid, dist, rels) AS (
       SELECT ${root.id}::text AS eid, 0 AS dist, ARRAY[]::text[] AS rels
       UNION ALL
@@ -139,7 +138,7 @@ export async function handleNeighbors(
   return {
     ok: true,
     root,
-    neighbors: rows.map((r) => ({
+    neighbors: rows.map(r => ({
       id: r.id,
       name: r.name,
       type: r.type,

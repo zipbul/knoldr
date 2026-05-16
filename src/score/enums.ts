@@ -19,34 +19,34 @@
 // ============================================================
 
 export enum Verdict {
-  Verified = "verified",
-  Disputed = "disputed",
-  Unverified = "unverified",
-  NotApplicable = "not-applicable",
+  Verified = 'verified',
+  Disputed = 'disputed',
+  Unverified = 'unverified',
+  NotApplicable = 'not-applicable',
 }
 
 export enum ClaimType {
-  Factual = "factual",
-  Subjective = "subjective",
-  Predictive = "predictive",
-  Normative = "normative",
+  Factual = 'factual',
+  Subjective = 'subjective',
+  Predictive = 'predictive',
+  Normative = 'normative',
 }
 
 export enum Modality {
-  Asserted = "asserted",
-  Hedged = "hedged",
-  Possible = "possible",
-  Conditional = "conditional",
-  Quoted = "quoted",
+  Asserted = 'asserted',
+  Hedged = 'hedged',
+  Possible = 'possible',
+  Conditional = 'conditional',
+  Quoted = 'quoted',
 }
 
 export enum Quantifier {
-  Universal = "universal",
-  Existential = "existential",
-  Majority = "majority",
-  Minority = "minority",
-  Specific = "specific",
-  None = "none",
+  Universal = 'universal',
+  Existential = 'existential',
+  Majority = 'majority',
+  Minority = 'minority',
+  Specific = 'specific',
+  None = 'none',
 }
 
 // ============================================================
@@ -54,11 +54,11 @@ export enum Quantifier {
 // ============================================================
 
 export enum RelationType {
-  Supports = "supports",
-  Contradicts = "contradicts",
-  DerivesFrom = "derives-from",
-  SupersededBy = "superseded-by",
-  Refines = "refines",
+  Supports = 'supports',
+  Contradicts = 'contradicts',
+  DerivesFrom = 'derives-from',
+  SupersededBy = 'superseded-by',
+  Refines = 'refines',
 }
 
 // ============================================================
@@ -66,12 +66,12 @@ export enum RelationType {
 // ============================================================
 
 export enum VerdictTrigger {
-  Auto = "auto",
-  Feedback = "feedback",
-  Drift = "drift",
-  Reverify = "reverify",
-  Cove = "cove",
-  Manual = "manual",
+  Auto = 'auto',
+  Feedback = 'feedback',
+  Drift = 'drift',
+  Reverify = 'reverify',
+  Cove = 'cove',
+  Manual = 'manual',
 }
 
 // ============================================================
@@ -79,12 +79,12 @@ export enum VerdictTrigger {
 // ============================================================
 
 export enum EvidenceSource {
-  DbCrossRef = "db-cross-ref",
-  KgContradiction = "kg-contradiction",
-  SourceCheck = "source-check",
-  Cove = "cove",
-  ExhaustedPipeline = "exhausted-pipeline",
-  ExceptionFinalize = "exception-finalize",
+  DbCrossRef = 'db-cross-ref',
+  KgContradiction = 'kg-contradiction',
+  SourceCheck = 'source-check',
+  Cove = 'cove',
+  ExhaustedPipeline = 'exhausted-pipeline',
+  ExceptionFinalize = 'exception-finalize',
 }
 
 // ============================================================
@@ -92,35 +92,35 @@ export enum EvidenceSource {
 // ============================================================
 
 export enum ApplicationMethod {
-  Verified = "verified",
-  Applied = "applied",
-  Cited = "cited",
-  ReasonedOver = "reasoned-over",
+  Verified = 'verified',
+  Applied = 'applied',
+  Cited = 'cited',
+  ReasonedOver = 'reasoned-over',
 }
 
 export enum Outcome {
-  Held = "held",
-  Failed = "failed",
-  Partial = "partial",
+  Held = 'held',
+  Failed = 'failed',
+  Partial = 'partial',
 }
 
 export enum FailureDimension {
-  FullyFalse = "fully-false",
-  ScopeTooBroad = "scope-too-broad",
-  TimeExpired = "time-expired",
-  ModalityTooStrong = "modality-too-strong",
-  ContextMismatch = "context-mismatch",
-  PartiallyCorrect = "partially-correct",
+  FullyFalse = 'fully-false',
+  ScopeTooBroad = 'scope-too-broad',
+  TimeExpired = 'time-expired',
+  ModalityTooStrong = 'modality-too-strong',
+  ContextMismatch = 'context-mismatch',
+  PartiallyCorrect = 'partially-correct',
 }
 
 export enum EnrichmentStatus {
-  Pending = "pending",
-  FinalizedInferred = "finalized-inferred",
-  AwaitingPull = "awaiting-pull",
-  Enriched = "enriched",
-  ExpiredReporterUnavailable = "expired-reporter-unavailable",
-  SkippedBackpressure = "skipped-backpressure",
-  NotNeeded = "not-needed",
+  Pending = 'pending',
+  FinalizedInferred = 'finalized-inferred',
+  AwaitingPull = 'awaiting-pull',
+  Enriched = 'enriched',
+  ExpiredReporterUnavailable = 'expired-reporter-unavailable',
+  SkippedBackpressure = 'skipped-backpressure',
+  NotNeeded = 'not-needed',
 }
 
 // ============================================================
@@ -128,18 +128,18 @@ export enum EnrichmentStatus {
 // ============================================================
 
 export enum Signal {
-  Positive = "positive",
-  Negative = "negative",
+  Positive = 'positive',
+  Negative = 'negative',
 }
 
 export enum FeedbackReason {
-  Used = "used",
-  Helpful = "helpful",
-  Wrong = "wrong",
-  Outdated = "outdated",
-  Missing = "missing",
-  Irrelevant = "irrelevant",
-  Other = "other",
+  Used = 'used',
+  Helpful = 'helpful',
+  Wrong = 'wrong',
+  Outdated = 'outdated',
+  Missing = 'missing',
+  Irrelevant = 'irrelevant',
+  Other = 'other',
 }
 
 // ============================================================
@@ -147,21 +147,22 @@ export enum FeedbackReason {
 // ============================================================
 
 export enum EntryStatus {
-  Draft = "draft",
-  Active = "active",
+  Draft = 'draft',
+  Active = 'active',
 }
 
 export enum SourceType {
-  OfficialDocs = "official-docs",
-  GithubRelease = "github-release",
-  CveDb = "cve-db",
-  OfficialBlog = "official-blog",
-  ResearchPaper = "research-paper",
-  EstablishedBlog = "established-blog",
-  CommunityForum = "community-forum",
-  PersonalBlog = "personal-blog",
-  AiGenerated = "ai-generated",
-  Unknown = "unknown",
+  OfficialDocs = 'official-docs',
+  GithubRelease = 'github-release',
+  CveDb = 'cve-db',
+  OfficialBlog = 'official-blog',
+  ResearchPaper = 'research-paper',
+  EstablishedBlog = 'established-blog',
+  CommunityForum = 'community-forum',
+  PersonalBlog = 'personal-blog',
+  AiGenerated = 'ai-generated',
+  ReferenceWiki = 'reference-wiki',
+  Unknown = 'unknown',
 }
 
 // ============================================================
@@ -169,9 +170,9 @@ export enum SourceType {
 // ============================================================
 
 export enum IngestAction {
-  Stored = "stored",
-  Duplicate = "duplicate",
-  Rejected = "rejected",
+  Stored = 'stored',
+  Duplicate = 'duplicate',
+  Rejected = 'rejected',
 }
 
 // ============================================================
@@ -179,10 +180,10 @@ export enum IngestAction {
 // ============================================================
 
 export enum EntryScoreDimension {
-  Factuality = "factuality",
-  Novelty = "novelty",
-  Actionability = "actionability",
-  Signal = "signal",
+  Factuality = 'factuality',
+  Novelty = 'novelty',
+  Actionability = 'actionability',
+  Signal = 'signal',
 }
 
 // ============================================================
@@ -190,14 +191,14 @@ export enum EntryScoreDimension {
 // ============================================================
 
 export enum TrustLevel {
-  High = "high",
-  Medium = "medium",
-  Low = "low",
+  High = 'high',
+  Medium = 'medium',
+  Low = 'low',
 }
 
 export enum SortBy {
-  Authority = "authority",
-  CreatedAt = "created-at",
+  Authority = 'authority',
+  CreatedAt = 'created-at',
 }
 
 // ============================================================
@@ -210,8 +211,6 @@ export enum SortBy {
  * checking "is this string a valid enum value" without iterating
  * the enum object directly.
  */
-export function enumValues<T extends Record<string, string>>(
-  e: T,
-): readonly T[keyof T][] {
+export function enumValues<T extends Record<string, string>>(e: T): readonly T[keyof T][] {
   return Object.values(e) as T[keyof T][];
 }

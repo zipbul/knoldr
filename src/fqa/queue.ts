@@ -20,13 +20,13 @@
 //   burst of N, sequential drain → each Nth row takes N × per-row
 //   crash before drain → next audit sweep picks it up
 
-import { runEnrichment } from "./enrich";
-import { logger } from "../observability/logger";
+import { logger } from '../observability/logger';
+import { runEnrichment } from './enrich';
 
 const queue: string[] = [];
 let workerRunning = false;
 
-export function enqueueEnrichment(feedbackId: string): void {
+function enqueueEnrichment(feedbackId: string): void {
   queue.push(feedbackId);
   if (!workerRunning) {
     workerRunning = true;
@@ -46,7 +46,7 @@ async function drain(): Promise<void> {
         // transition out of `pending`.
         logger.warn(
           { feedbackId, error: (err as Error).message },
-          "in-process enrichment failed; will be retried by periodic audit",
+          'in-process enrichment failed; will be retried by periodic audit',
         );
       }
     }
@@ -56,6 +56,8 @@ async function drain(): Promise<void> {
 }
 
 /** For tests / introspection. */
-export function pendingCount(): number {
+function pendingCount(): number {
   return queue.length;
 }
+
+export { enqueueEnrichment, pendingCount };

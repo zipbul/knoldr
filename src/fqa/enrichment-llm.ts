@@ -6,19 +6,20 @@
 // they are weighted lower than direct submissions and never claim
 // to be the reporter's own answer.
 
-import { z } from "zod/v4";
-import { callLlm, extractJson } from "../llm/cli";
-import { logger } from "../observability/logger";
-import { FAILURE_DIMENSIONS } from "../score/feedback-constants";
+import { z } from 'zod/v4';
+
+import { callLlm, extractJson } from '../llm/cli';
+import { logger } from '../observability/logger';
+import { FailureDimension } from '../score/enums';
 
 const inferenceSchema = z.object({
-  failure_dimension: z.enum(FAILURE_DIMENSIONS).nullable().optional(),
+  failure_dimension: z.enum(FailureDimension).nullable().optional(),
   partial_truth: z.number().min(0).max(1).nullable().optional(),
   counter_source_url: z.string().max(2000).nullable().optional(),
 });
 
-export interface FqaInference {
-  failureDimension: (typeof FAILURE_DIMENSIONS)[number] | null;
+interface FqaInference {
+  failureDimension: FailureDimension | null;
   partialTruth: number | null;
   counterSourceUrl: string | null;
   llmVersion: string;
@@ -60,11 +61,10 @@ const URL_REGEX = /https?:\/\/[^\s<>"']{8,2000}/i;
  * carry the first match through. The LLM still owns failure_dimension
  * and partial_truth because those need semantic judgment.
  */
-export async function inferFromAuditNote(
-  claimStatement: string,
-  auditNote: string,
-): Promise<FqaInference | null> {
-  if (!auditNote || auditNote.trim().length === 0) return null;
+async function inferFromAuditNote(claimStatement: string, auditNote: string): Promise<FqaInference | null> {
+  if (!auditNote || auditNote.trim().length === 0) {
+    return null;
+  }
 
   const user = `CLAIM:\n${claimStatement.slice(0, 1000)}\n\nAGENT NOTE:\n${auditNote.slice(0, 4000)}`;
 
@@ -73,10 +73,7 @@ export async function inferFromAuditNote(
     const out = await callLlm({ system: SYSTEM_PROMPT, user });
     parsed = inferenceSchema.parse(extractJson(out));
   } catch (err) {
-    logger.warn(
-      { error: (err as Error).message },
-      "fqa enrichment LLM call/parse failed — leaving feedback un-enriched",
-    );
+    logger.warn({ error: (err as Error).message }, 'fqa enrichment LLM call/parse failed — leaving feedback un-enriched');
     return null;
   }
 
@@ -86,18 +83,22 @@ export async function inferFromAuditNote(
   // when the LLM left null AND the note clearly contains a URL.
   if (!counterSourceUrl) {
     const m = auditNote.match(URL_REGEX);
-    if (m) counterSourceUrl = m[0];
+    if (m) {
+      counterSourceUrl = m[0];
+    }
   }
 
   return {
     failureDimension: parsed.failure_dimension ?? null,
     partialTruth: parsed.partial_truth ?? null,
     counterSourceUrl,
-    llmVersion: process.env.KNOLDR_FQA_LLM_VERSION ?? "ollama:default",
+    llmVersion: process.env.KNOLDR_FQA_LLM_VERSION ?? 'ollama:default',
   };
 }
 
 // Re-export the shared computation so existing FQA callers keep
 // working without an extra import. Single source of truth lives in
 // `src/score/feedback-strength.ts`.
-export { computeFeedbackEvidenceStrength as recomputeEvidenceStrength } from "../score/feedback-strength";
+export { computeFeedbackEvidenceStrength as recomputeEvidenceStrength } from '../score/feedback-strength';
+
+export { inferFromAuditNote };

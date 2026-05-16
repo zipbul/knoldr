@@ -29,24 +29,20 @@
 //   KNOLDR_FQA_TTL_SWEEP_INTERVAL_MS default 30 min
 //   KNOLDR_FQA_WORKERS=0            disables both workers
 
-import { logger } from "../observability/logger";
-import { withClusterLock } from "../observability/worker-lock";
-import { auditAndEnrich, expireStalePullTasks } from "./enrich";
+import { logger } from '../observability/logger';
+import { withClusterLock } from '../observability/worker-lock';
+import { auditAndEnrich, expireStalePullTasks } from './enrich';
 
 export function startFqaWorkers(): void {
   // Honor opt-out for deployments that want FQA wholly disabled.
-  if (process.env.KNOLDR_FQA_WORKERS === "0") {
-    logger.info("FQA workers disabled by KNOLDR_FQA_WORKERS=0");
+  if (process.env.KNOLDR_FQA_WORKERS === '0') {
+    logger.info('FQA workers disabled by KNOLDR_FQA_WORKERS=0');
     return;
   }
 
-  const auditMs = Number(
-    process.env.KNOLDR_FQA_AUDIT_INTERVAL_MS ?? 5 * 60 * 1000,
-  );
+  const auditMs = Number(process.env.KNOLDR_FQA_AUDIT_INTERVAL_MS ?? 5 * 60 * 1000);
   const batchSize = Number(process.env.KNOLDR_FQA_AUDIT_BATCH ?? 50);
-  const windowHours = Number(
-    process.env.KNOLDR_FQA_AUDIT_WINDOW_HOURS ?? 24,
-  );
+  const windowHours = Number(process.env.KNOLDR_FQA_AUDIT_WINDOW_HOURS ?? 24);
   const maxDrain = Number(process.env.KNOLDR_FQA_AUDIT_MAX_DRAIN ?? 5);
 
   // Continuous-drain sweep:
@@ -56,7 +52,7 @@ export function startFqaWorkers(): void {
   // - Release the lock between ticks so a co-located finetune cycle
   //   or a sibling replica can take a turn.
   const runDrainCycle = async (): Promise<void> => {
-    await withClusterLock("fqa-audit", async () => {
+    await withClusterLock('fqa-audit', async () => {
       let drainPasses = 0;
       let totalScanned = 0;
       let totalEnriched = 0;
@@ -73,7 +69,9 @@ export function startFqaWorkers(): void {
             skippedAgg.set(s.reason, (skippedAgg.get(s.reason) ?? 0) + s.count);
           }
           drainPasses++;
-          if (report.scanned < batchSize) break; // queue drained
+          if (report.scanned < batchSize) {
+            break;
+          } // queue drained
         }
         if (totalScanned > 0) {
           logger.info(
@@ -87,39 +85,28 @@ export function startFqaWorkers(): void {
               })),
               hitDrainCap: drainPasses === maxDrain,
             },
-            "FQA audit drain complete",
+            'FQA audit drain complete',
           );
         }
       } catch (err) {
-        logger.error(
-          { error: (err as Error).message },
-          "FQA audit drain failed",
-        );
+        logger.error({ error: (err as Error).message }, 'FQA audit drain failed');
       }
     });
   };
 
   setInterval(runDrainCycle, auditMs);
 
-  const ttlHours = Number(process.env.KNOLDR_FQA_PULL_TTL_HOURS ?? "24");
-  const ttlMs = Number(
-    process.env.KNOLDR_FQA_TTL_SWEEP_INTERVAL_MS ?? 30 * 60 * 1000,
-  );
+  const ttlHours = Number(process.env.KNOLDR_FQA_PULL_TTL_HOURS ?? '24');
+  const ttlMs = Number(process.env.KNOLDR_FQA_TTL_SWEEP_INTERVAL_MS ?? 30 * 60 * 1000);
   setInterval(async () => {
-    await withClusterLock("fqa-ttl-sweep", async () => {
+    await withClusterLock('fqa-ttl-sweep', async () => {
       try {
         await expireStalePullTasks(ttlHours);
       } catch (err) {
-        logger.error(
-          { error: (err as Error).message },
-          "FQA TTL sweep failed",
-        );
+        logger.error({ error: (err as Error).message }, 'FQA TTL sweep failed');
       }
     });
   }, ttlMs);
 
-  logger.info(
-    { auditMs, batchSize, windowHours, maxDrain, ttlMs, ttlHours },
-    "FQA background workers started",
-  );
+  logger.info({ auditMs, batchSize, windowHours, maxDrain, ttlMs, ttlHours }, 'FQA background workers started');
 }

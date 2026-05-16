@@ -1,10 +1,11 @@
-import { sql } from "drizzle-orm";
-import { db } from "../db/connection";
-import { extractTriples, type ExtractedTriple } from "./extract";
-import { normalizePredicate } from "./predicate";
-import { logger } from "../observability/logger";
+import { sql } from 'drizzle-orm';
 
-export interface KgContradiction {
+import { getDb } from '../db/connection';
+import { logger } from '../observability/logger';
+import { extractTriples, type ExtractedTriple } from './extract';
+import { normalizePredicate } from './predicate';
+
+interface KgContradiction {
   newTriple: ExtractedTriple;
   conflictingObjects: Array<{
     objectName: string;
@@ -42,20 +43,24 @@ export interface KgContradiction {
  * predicate test below — only single-value relations (e.g. "runs_on",
  * "founded_by", "capital_of") trigger a contradiction signal.
  */
-export async function checkKgContradiction(
-  statement: string,
-): Promise<KgContradiction | null> {
+async function checkKgContradiction(statement: string): Promise<KgContradiction | null> {
   const triples = await extractTriples(statement);
-  if (triples.length === 0) return null;
+  if (triples.length === 0) {
+    return null;
+  }
 
   let best: KgContradiction | null = null;
 
   for (const t of triples) {
     const conflicts = await findConflictingObjects(t);
-    if (conflicts.length === 0) continue;
+    if (conflicts.length === 0) {
+      continue;
+    }
 
     const isFunctional = await isFunctionalPredicate(t.predicate);
-    if (!isFunctional) continue;
+    if (!isFunctional) {
+      continue;
+    }
 
     const totalSupport = conflicts.reduce((s, c) => s + c.supportingClaims, 0);
     // confidence floor 0.7 once functional + at least one corroborated
@@ -76,7 +81,7 @@ export async function checkKgContradiction(
         conflicts: best.conflictingObjects.length,
         confidence: best.confidence,
       },
-      "KG contradiction detected",
+      'KG contradiction detected',
     );
   }
   return best;
@@ -94,9 +99,7 @@ interface ConflictRow {
  * triple but pointing at a *different* object. Subject is matched by
  * normalized name + type (case-insensitive).
  */
-async function findConflictingObjects(
-  t: ExtractedTriple,
-): Promise<
+async function findConflictingObjects(t: ExtractedTriple): Promise<
   Array<{
     objectName: string;
     objectType: string;
@@ -118,7 +121,7 @@ async function findConflictingObjects(
   // object) so the verify pipeline can write CONTRADICTS edges from
   // the new claim into each. The cap bounds edge fanout when a
   // subject has hundreds of corroborating claims.
-  const rows = (await db.execute(sql`
+  const rows = (await getDb().execute(sql`
     SELECT
       tgt.name AS object_name,
       tgt.type AS object_type,
@@ -137,7 +140,7 @@ async function findConflictingObjects(
     LIMIT 5
   `)) as unknown as ConflictRow[];
 
-  return rows.map((r) => ({
+  return rows.map(r => ({
     objectName: r.object_name,
     objectType: r.object_type,
     claimIds: r.claim_ids ?? [],
@@ -172,9 +175,11 @@ const functionalCache = new Map<string, FunctionalCacheEntry>();
 async function isFunctionalPredicate(predicate: string): Promise<boolean> {
   const pred = normalizePredicate(predicate);
   const cached = functionalCache.get(pred);
-  if (cached && Date.now() < cached.expiresAt) return cached.functional;
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.functional;
+  }
 
-  const rows = (await db.execute(sql`
+  const rows = (await getDb().execute(sql`
     SELECT
       COUNT(DISTINCT r.target_entity_id)::float
         / GREATEST(COUNT(DISTINCT r.source_entity_id), 1) AS avg_objects_per_subject,
@@ -190,3 +195,6 @@ async function isFunctionalPredicate(predicate: string): Promise<boolean> {
   functionalCache.set(pred, { functional, expiresAt: Date.now() + FUNCTIONAL_TTL_MS });
   return functional;
 }
+
+export { checkKgContradiction };
+export type { KgContradiction };

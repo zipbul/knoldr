@@ -12,29 +12,18 @@
 // returns null and inserts nothing, so wiring this into CI from day
 // one is safe.
 
-import { ulid } from "ulid";
-import { and, desc, eq, sql } from "drizzle-orm";
-import { db } from "../db/connection";
-import {
-  entry,
-  entrySource,
-  claim,
-  goldenSetClaim,
-  goldenSetRun,
-} from "../db/schema";
-import { generateEmbedding } from "../ingest/embed";
-import { verifyClaim } from "../claim/verify";
-import { authorityFor } from "../claim/authority";
-import { logger } from "../observability/logger";
+import { and, desc, eq, sql } from 'drizzle-orm';
+import { ulid } from 'ulid';
 
-type Verdict = "verified" | "disputed" | "unverified" | "not-applicable";
+import { authorityFor } from '../claim/authority';
+import { verifyClaim } from '../claim/verify';
+import { getDb } from '../db/connection';
+import { entry, entrySource, claim, goldenSetClaim, goldenSetRun } from '../db/schema';
+import { generateEmbedding } from '../ingest/embed';
+import { logger } from '../observability/logger';
+import { enumValues, SourceType, Verdict } from '../score/enums';
 
-const VERDICTS: readonly Verdict[] = [
-  "verified",
-  "disputed",
-  "unverified",
-  "not-applicable",
-] as const;
+const VERDICTS: readonly Verdict[] = enumValues(Verdict);
 
 interface PerVerdictMetric {
   tp: number;
@@ -46,7 +35,7 @@ interface PerVerdictMetric {
   support: number;
 }
 
-export interface EvalResult {
+interface EvalResult {
   runId: string;
   total: number;
   correct: number;
@@ -81,13 +70,16 @@ function finalizeMetric(m: PerVerdictMetric): PerVerdictMetric {
   return { ...m, precision, recall, f1 };
 }
 
-async function evaluateOne(item: {
-  id: string;
-  statement: string;
-  claimType: string;
-  expectedVerdict: string;
-  sourceUrls: string[] | null;
-}, runId: string): Promise<ItemResult> {
+async function evaluateOne(
+  item: {
+    id: string;
+    statement: string;
+    claimType: string;
+    expectedVerdict: string;
+    sourceUrls: string[] | null;
+  },
+  runId: string,
+): Promise<ItemResult> {
   const expected = item.expectedVerdict as Verdict;
   const tempEntryId = `eval-${runId}-${item.id}`;
   const tempCreatedAt = new Date();
@@ -95,22 +87,21 @@ async function evaluateOne(item: {
   try {
     const embedding = await generateEmbedding(item.statement);
     const claimId = ulid();
-    const initialVerdict: Verdict =
-      item.claimType === "factual" ? "unverified" : "not-applicable";
+    const initialVerdict: Verdict = item.claimType === 'factual' ? Verdict.Unverified : Verdict.NotApplicable;
 
-    await db.transaction(async (tx) => {
+    await getDb().transaction(async tx => {
       await tx.insert(entry).values({
         id: tempEntryId,
         title: `eval-${runId}`.slice(0, 500),
         content: item.statement.slice(0, 50000),
-        language: "en",
+        language: 'en',
         metadata: { eval: true, runId, goldenId: item.id },
         authority: 0,
         // status='draft' keeps the eval entry invisible to active-only
         // search/extract queries. Verify's dbCrossRef ignores it via
         // the entry_id <> match exclusion, so cross-contamination
         // between concurrent eval items is also blocked.
-        status: "draft",
+        status: 'draft',
         createdAt: tempCreatedAt,
         embedding,
       });
@@ -130,11 +121,11 @@ async function evaluateOne(item: {
       // missing the production-dominant source-grounded NLI signal.
       if (item.sourceUrls && item.sourceUrls.length > 0) {
         await tx.insert(entrySource).values(
-          item.sourceUrls.map((url) => ({
+          item.sourceUrls.map(url => ({
             entryId: tempEntryId,
             entryCreatedAt: tempCreatedAt,
             url,
-            sourceType: "unknown",
+            sourceType: SourceType.Unknown,
             trust: authorityFor(url),
           })),
         );
@@ -144,10 +135,10 @@ async function evaluateOne(item: {
     let predicted: Verdict;
     let certainty = 0;
 
-    if (item.claimType === "factual") {
+    if (item.claimType === 'factual') {
       const result = await verifyClaim(claimId);
       if (!result) {
-        predicted = "unverified";
+        predicted = Verdict.Unverified;
       } else {
         predicted = result.verdict as Verdict;
         certainty = result.certainty;
@@ -156,7 +147,7 @@ async function evaluateOne(item: {
       // Production never verifies non-factual claims — they ship as
       // not_applicable. Mirror that here so the metric reflects real
       // pipeline behavior, not a hypothetical verifier.
-      predicted = "not-applicable";
+      predicted = Verdict.NotApplicable;
     }
 
     return {
@@ -174,31 +165,23 @@ async function evaluateOne(item: {
       statement: item.statement,
       claimType: item.claimType,
       expected,
-      predicted: "unverified",
+      predicted: Verdict.Unverified,
       correct: false,
       certainty: 0,
       error: (err as Error).message,
     };
   } finally {
     try {
-      await db
+      await getDb()
         .delete(entry)
-        .where(
-          and(
-            eq(entry.id, tempEntryId),
-            eq(entry.createdAt, tempCreatedAt),
-          ),
-        );
+        .where(and(eq(entry.id, tempEntryId), eq(entry.createdAt, tempCreatedAt)));
     } catch (cleanupErr) {
-      logger.warn(
-        { tempEntryId, err: (cleanupErr as Error).message },
-        "golden eval cleanup failed — temp entry may persist",
-      );
+      logger.warn({ tempEntryId, err: (cleanupErr as Error).message }, 'golden eval cleanup failed — temp entry may persist');
     }
   }
 }
 
-export interface GoldenEvalOptions {
+interface GoldenEvalOptions {
   commitSha?: string;
   modelVersions?: Record<string, string>;
 }
@@ -211,10 +194,10 @@ export interface GoldenEvalOptions {
 // either side can't silently desync the two locks (the previous
 // hand-converted decimal was wrong and rendered this coordination
 // inert).
-const FT_LOCK_KEY = BigInt("0x6B6E6F6C64720001").toString();
+const FT_LOCK_KEY = BigInt('0x6B6E6F6C64720001').toString();
 
 async function withFinetuneShield<T>(fn: () => Promise<T>): Promise<T> {
-  const { getPgClient } = await import("../db/connection");
+  const { getPgClient } = await import('../db/connection');
   const client = getPgClient();
   const reserved = await client.reserve();
   try {
@@ -225,9 +208,7 @@ async function withFinetuneShield<T>(fn: () => Promise<T>): Promise<T> {
       SELECT pg_try_advisory_lock_shared(${FT_LOCK_KEY}::bigint) AS ok
     `;
     if (!rows[0]?.ok) {
-      throw new Error(
-        "finetune cycle in progress — eval skipped to avoid GPU/Ollama contention",
-      );
+      throw new Error('finetune cycle in progress — eval skipped to avoid GPU/Ollama contention');
     }
     try {
       return await fn();
@@ -243,17 +224,13 @@ async function withFinetuneShield<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function runGoldenEval(
-  opts: GoldenEvalOptions = {},
-): Promise<EvalResult | null> {
+async function runGoldenEval(opts: GoldenEvalOptions = {}): Promise<EvalResult | null> {
   return await withFinetuneShield(() => runGoldenEvalInner(opts));
 }
 
-async function runGoldenEvalInner(
-  opts: GoldenEvalOptions = {},
-): Promise<EvalResult | null> {
+async function runGoldenEvalInner(opts: GoldenEvalOptions = {}): Promise<EvalResult | null> {
   const runId = ulid();
-  const rawItems = await db
+  const rawItems = await getDb()
     .select({
       id: goldenSetClaim.id,
       statement: goldenSetClaim.statement,
@@ -264,40 +241,37 @@ async function runGoldenEvalInner(
     .from(goldenSetClaim)
     .where(eq(goldenSetClaim.active, 1));
 
-  const items = rawItems.map((r) => ({
+  const items = rawItems.map(r => ({
     id: r.id,
     statement: r.statement,
     claimType: r.claimType,
     expectedVerdict: r.expectedVerdict,
     sourceUrls: Array.isArray(r.sourceUrls)
-      ? (r.sourceUrls as unknown[]).filter((u): u is string => typeof u === "string")
+      ? (r.sourceUrls as unknown[]).filter((u): u is string => typeof u === 'string')
       : null,
   }));
 
   if (items.length === 0) {
-    logger.info({ runId }, "golden set empty — no evaluation performed");
+    logger.info({ runId }, 'golden set empty — no evaluation performed');
     return null;
   }
 
-  logger.info({ runId, total: items.length }, "golden eval starting");
+  logger.info({ runId, total: items.length }, 'golden eval starting');
 
   const results: ItemResult[] = [];
   for (const item of items) {
     const r = await evaluateOne(item, runId);
     results.push(r);
     if (r.error) {
-      logger.warn(
-        { goldenId: r.goldenId, error: r.error },
-        "golden eval item errored — counted as incorrect",
-      );
+      logger.warn({ goldenId: r.goldenId, error: r.error }, 'golden eval item errored — counted as incorrect');
     }
   }
 
   const byVerdict: Record<Verdict, PerVerdictMetric> = {
-    "verified": emptyMetric(),
-    "disputed": emptyMetric(),
-    "unverified": emptyMetric(),
-    "not-applicable": emptyMetric(),
+    verified: emptyMetric(),
+    disputed: emptyMetric(),
+    unverified: emptyMetric(),
+    'not-applicable': emptyMetric(),
   };
   const byType: Record<string, PerVerdictMetric> = {};
 
@@ -311,16 +285,25 @@ async function runGoldenEvalInner(
     }
 
     const tk = r.claimType;
-    if (!byType[tk]) byType[tk] = emptyMetric();
+    if (!byType[tk]) {
+      byType[tk] = emptyMetric();
+    }
     byType[tk].support++;
-    if (r.correct) byType[tk].tp++;
-    else byType[tk].fp++;
+    if (r.correct) {
+      byType[tk].tp++;
+    } else {
+      byType[tk].fp++;
+    }
   }
 
-  for (const v of VERDICTS) byVerdict[v] = finalizeMetric(byVerdict[v]);
-  for (const k of Object.keys(byType)) byType[k] = finalizeMetric(byType[k]!);
+  for (const v of VERDICTS) {
+    byVerdict[v] = finalizeMetric(byVerdict[v]);
+  }
+  for (const k of Object.keys(byType)) {
+    byType[k] = finalizeMetric(byType[k]!);
+  }
 
-  const correct = results.filter((r) => r.correct).length;
+  const correct = results.filter(r => r.correct).length;
   const total = results.length;
 
   // Macro-averaged across verdict classes that have any support.
@@ -328,19 +311,11 @@ async function runGoldenEvalInner(
   // common one — a verifier that calls everything 'unverified' should
   // score badly here even if 70% of the golden set happens to be
   // unverified.
-  const supported = VERDICTS.filter((v) => byVerdict[v].support > 0);
+  const supported = VERDICTS.filter(v => byVerdict[v].support > 0);
   const macroPrecision =
-    supported.length === 0
-      ? 0
-      : supported.reduce((s, v) => s + byVerdict[v].precision, 0) / supported.length;
-  const macroRecall =
-    supported.length === 0
-      ? 0
-      : supported.reduce((s, v) => s + byVerdict[v].recall, 0) / supported.length;
-  const macroF1 =
-    supported.length === 0
-      ? 0
-      : supported.reduce((s, v) => s + byVerdict[v].f1, 0) / supported.length;
+    supported.length === 0 ? 0 : supported.reduce((s, v) => s + byVerdict[v].precision, 0) / supported.length;
+  const macroRecall = supported.length === 0 ? 0 : supported.reduce((s, v) => s + byVerdict[v].recall, 0) / supported.length;
+  const macroF1 = supported.length === 0 ? 0 : supported.reduce((s, v) => s + byVerdict[v].f1, 0) / supported.length;
 
   // Baseline lookup: pull the most recent run *from Knoldr's own
   // eval harness only*. finetune/run.py writes accuracy-only rows
@@ -349,45 +324,45 @@ async function runGoldenEvalInner(
   // to this harness's macro-F1 across the full verify pipeline.
   // Filtering them out prevents finetune accuracy bleeding into the
   // pipeline regression check.
-  const [prior] = await db
+  const [prior] = await getDb()
     .select({ id: goldenSetRun.id, f1: goldenSetRun.f1Overall })
     .from(goldenSetRun)
-    .where(
-      sql`COALESCE(${goldenSetRun.metrics}->>'metric_semantics', '') <> 'accuracy_only'`,
-    )
+    .where(sql`COALESCE(${goldenSetRun.metrics}->>'metric_semantics', '') <> 'accuracy_only'`)
     .orderBy(desc(goldenSetRun.ranAt))
     .limit(1);
 
   const regressed = prior ? macroF1 < prior.f1 : null;
 
-  await db.insert(goldenSetRun).values({
-    id: runId,
-    commitSha: opts.commitSha ?? null,
-    modelVersions: opts.modelVersions ?? { embedding: "all-MiniLM-L6-v2" },
-    total,
-    correct,
-    precisionOverall: macroPrecision,
-    recallOverall: macroRecall,
-    f1Overall: macroF1,
-    metrics: {
-      byVerdict,
-      byType,
-      // Store every result so post-hoc analysis can drill into
-      // specific misclassifications without re-running.
-      results: results.map((r) => ({
-        goldenId: r.goldenId,
-        statement: r.statement,
-        claimType: r.claimType,
-        expected: r.expected,
-        predicted: r.predicted,
-        correct: r.correct,
-        certainty: r.certainty,
-        error: r.error ?? null,
-      })),
-    },
-    baselineRunId: prior?.id ?? null,
-    regressed: regressed === null ? null : regressed ? 1 : 0,
-  });
+  await getDb()
+    .insert(goldenSetRun)
+    .values({
+      id: runId,
+      commitSha: opts.commitSha ?? null,
+      modelVersions: opts.modelVersions ?? { embedding: 'all-MiniLM-L6-v2' },
+      total,
+      correct,
+      precisionOverall: macroPrecision,
+      recallOverall: macroRecall,
+      f1Overall: macroF1,
+      metrics: {
+        byVerdict,
+        byType,
+        // Store every result so post-hoc analysis can drill into
+        // specific misclassifications without re-running.
+        results: results.map(r => ({
+          goldenId: r.goldenId,
+          statement: r.statement,
+          claimType: r.claimType,
+          expected: r.expected,
+          predicted: r.predicted,
+          correct: r.correct,
+          certainty: r.certainty,
+          error: r.error ?? null,
+        })),
+      },
+      baselineRunId: prior?.id ?? null,
+      regressed: regressed === null ? null : regressed ? 1 : 0,
+    });
 
   logger.info(
     {
@@ -400,7 +375,7 @@ async function runGoldenEvalInner(
       regressed,
       baselineRunId: prior?.id ?? null,
     },
-    "golden eval complete",
+    'golden eval complete',
   );
 
   return {
@@ -416,3 +391,5 @@ async function runGoldenEvalInner(
     regressed,
   };
 }
+
+export { runGoldenEval };

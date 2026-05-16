@@ -7,9 +7,10 @@
 //                   wants to know "is there active dispute around
 //                   topic X" without knowing a specific claim id.
 
-import { z } from "zod";
-import { sql } from "drizzle-orm";
-import { db } from "../../db/connection";
+import { sql } from 'drizzle-orm';
+import { z } from 'zod';
+
+import { getDb } from '../../db/connection';
 
 const MAX_RESULTS = 50;
 
@@ -19,11 +20,11 @@ const inputSchema = z
     entity: z.string().min(1).max(200).optional(),
     limit: z.number().int().min(1).max(MAX_RESULTS).default(20),
   })
-  .refine((v) => v.claimId || v.entity, {
-    message: "either claimId or entity must be provided",
+  .refine(v => v.claimId || v.entity, {
+    message: 'either claimId or entity must be provided',
   });
 
-export interface ContradictionPair {
+interface ContradictionPair {
   fromClaimId: string;
   fromStatement: string;
   fromVerdict: string;
@@ -35,18 +36,14 @@ export interface ContradictionPair {
   weight: number;
 }
 
-export type ContradictionsResult =
-  | { ok: true; pairs: ContradictionPair[] }
-  | { ok: false; error: "invalid_input"; message: string };
+type ContradictionsResult = { ok: true; pairs: ContradictionPair[] } | { ok: false; error: 'invalid_input'; message: string };
 
-export async function handleContradictions(
-  input: Record<string, unknown>,
-): Promise<ContradictionsResult> {
+export async function handleContradictions(input: Record<string, unknown>): Promise<ContradictionsResult> {
   let validated: z.infer<typeof inputSchema>;
   try {
     validated = inputSchema.parse(input);
   } catch (err) {
-    return { ok: false, error: "invalid_input", message: (err as Error).message };
+    return { ok: false, error: 'invalid_input', message: (err as Error).message };
   }
 
   const limit = validated.limit;
@@ -64,7 +61,7 @@ export async function handleContradictions(
   }>;
 
   if (validated.claimId) {
-    rows = (await db.execute(sql`
+    rows = (await getDb().execute(sql`
       SELECT
         c1.id AS src_id, c1.statement AS src_statement, c1.verdict AS src_verdict, c1.certainty AS src_certainty,
         c2.id AS tgt_id, c2.statement AS tgt_statement, c2.verdict AS tgt_verdict, c2.certainty AS tgt_certainty,
@@ -84,7 +81,7 @@ export async function handleContradictions(
     // contradicted by a claim that didn't yet have the same entity
     // attached — both directions of asymmetric mention should
     // count as "this entity is involved in a dispute".
-    rows = (await db.execute(sql`
+    rows = (await getDb().execute(sql`
       WITH entity_claims AS (
         SELECT DISTINCT kr.claim_id
         FROM kg_relation kr
@@ -112,7 +109,7 @@ export async function handleContradictions(
 
   return {
     ok: true,
-    pairs: rows.map((r) => ({
+    pairs: rows.map(r => ({
       fromClaimId: r.src_id,
       fromStatement: r.src_statement,
       fromVerdict: r.src_verdict,

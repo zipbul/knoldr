@@ -1,11 +1,14 @@
-import { ulid } from "ulid";
-import { db } from "../db/connection";
-import { claim, verifyQueue } from "../db/schema";
-import { generateEmbedding } from "../ingest/embed";
-import { logger } from "../observability/logger";
-import type { ExtractedClaim } from "./extract";
+import { ulid } from 'ulid';
 
-export interface StoredClaim {
+import type { ExtractedClaim } from './extract';
+
+import { getDb } from '../db/connection';
+import { claim, verifyQueue } from '../db/schema';
+import { generateEmbedding } from '../ingest/embed';
+import { logger } from '../observability/logger';
+import { ClaimType, Verdict } from '../score/enums';
+
+interface StoredClaim {
   id: string;
   type: string;
   verdict: string;
@@ -22,16 +25,18 @@ export async function storeClaims(
   extracted: ExtractedClaim[],
   priority = 0,
 ): Promise<StoredClaim[]> {
-  if (extracted.length === 0) return [];
+  if (extracted.length === 0) {
+    return [];
+  }
 
   const stored: StoredClaim[] = [];
 
   for (const c of extracted) {
     const id = ulid();
     const embedding = await generateEmbedding(c.statement);
-    const verdict = c.type === "factual" ? "unverified" : "not-applicable";
+    const verdict = c.type === ClaimType.Factual ? Verdict.Unverified : Verdict.NotApplicable;
 
-    await db.transaction(async (tx) => {
+    await getDb().transaction(async tx => {
       await tx.insert(claim).values({
         id,
         entryId,
@@ -57,7 +62,7 @@ export async function storeClaims(
         validUntil: c.validUntil ? new Date(c.validUntil) : null,
       });
 
-      if (c.type === "factual") {
+      if (c.type === ClaimType.Factual) {
         await tx.insert(verifyQueue).values({
           claimId: id,
           priority,
@@ -72,9 +77,9 @@ export async function storeClaims(
     {
       entryId,
       total: stored.length,
-      factual: stored.filter((s) => s.type === "factual").length,
+      factual: stored.filter(s => s.type === ClaimType.Factual).length,
     },
-    "claims stored",
+    'claims stored',
   );
 
   return stored;

@@ -5,9 +5,10 @@
 // surface metadata (statement, verdict, certainty, source URL).
 // The walk caps at MAX_DEPTH hops to bound runtime.
 
-import { z } from "zod";
-import { sql } from "drizzle-orm";
-import { db } from "../../db/connection";
+import { sql } from 'drizzle-orm';
+import { z } from 'zod';
+
+import { getDb } from '../../db/connection';
 
 const MAX_DEPTH = 8;
 const MAX_RESULTS = 100;
@@ -17,7 +18,7 @@ const inputSchema = z.object({
   maxDepth: z.number().int().min(1).max(MAX_DEPTH).default(4),
 });
 
-export interface ProvenanceNode {
+interface ProvenanceNode {
   claimId: string;
   statement: string;
   verdict: string;
@@ -26,31 +27,31 @@ export interface ProvenanceNode {
   depth: number;
 }
 
-export type ProvenanceResult =
+type ProvenanceResult =
   | {
       ok: true;
       rootClaimId: string;
       ancestors: ProvenanceNode[];
     }
-  | { ok: false; error: "invalid_input" | "claim_not_found"; message: string };
+  | { ok: false; error: 'invalid_input' | 'claim_not_found'; message: string };
 
-export async function handleProvenance(
-  input: Record<string, unknown>,
-): Promise<ProvenanceResult> {
+export async function handleProvenance(input: Record<string, unknown>): Promise<ProvenanceResult> {
   let validated: z.infer<typeof inputSchema>;
   try {
     validated = inputSchema.parse(input);
   } catch (err) {
-    return { ok: false, error: "invalid_input", message: (err as Error).message };
+    return { ok: false, error: 'invalid_input', message: (err as Error).message };
   }
 
-  const rootCheck = (await db.execute(
+  const rootCheck = (await getDb().execute(
     sql`SELECT id FROM claim WHERE id = ${validated.claimId} LIMIT 1`,
-  )) as unknown as Array<{ id: string }>;
+  )) as unknown as Array<{
+    id: string;
+  }>;
   if (rootCheck.length === 0) {
     return {
       ok: false,
-      error: "claim_not_found",
+      error: 'claim_not_found',
       message: `claim ${validated.claimId} does not exist`,
     };
   }
@@ -58,7 +59,7 @@ export async function handleProvenance(
   // Recursive CTE: follow derives_from edges. Each step expands the
   // frontier; depth is bounded by maxDepth. We surface the minimum
   // depth at which each ancestor first appears.
-  const rows = (await db.execute(sql`
+  const rows = (await getDb().execute(sql`
     WITH RECURSIVE walk(cid, depth) AS (
       SELECT ${validated.claimId}::text AS cid, 0 AS depth
       UNION ALL
@@ -92,7 +93,7 @@ export async function handleProvenance(
   return {
     ok: true,
     rootClaimId: validated.claimId,
-    ancestors: rows.map((r) => ({
+    ancestors: rows.map(r => ({
       claimId: r.claim_id,
       statement: r.statement,
       verdict: r.verdict,

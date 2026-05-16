@@ -8,15 +8,15 @@
 // "Recent" is bounded so this can't accidentally rescore feedback from
 // years ago when an old claim suddenly drifts.
 
-import { and, eq, gte, sql } from "drizzle-orm";
-import { db } from "../db/connection";
-import { agentFeedbackAuthority, claimFeedback } from "../db/schema";
-import { logger } from "../observability/logger";
+import { and, eq, gte, sql } from 'drizzle-orm';
+
+import { getDb } from '../db/connection';
+import { agentFeedbackAuthority, claimFeedback } from '../db/schema';
+import { logger } from '../observability/logger';
+import { Outcome, Verdict } from '../score/enums';
 
 const FEEDBACK_LOOKBACK_DAYS = 30;
 const EMA_ALPHA = 0.1; // slow learning — one event can't whiplash authority
-
-type Verdict = "verified" | "disputed" | "unverified" | "not-applicable";
 
 /**
  * Classify the verdict transition into one of three outcomes:
@@ -26,23 +26,22 @@ type Verdict = "verified" | "disputed" | "unverified" | "not-applicable";
  *    held feedback was correct
  *  - "no_signal": no movement worth learning from
  */
-function classify(
-  oldVerdict: Verdict,
-  newVerdict: Verdict,
-): "moved_away_from_verified" | "moved_to_verified" | "no_signal" {
-  if (oldVerdict === newVerdict) return "no_signal";
+function classify(oldVerdict: Verdict, newVerdict: Verdict): 'moved_away_from_verified' | 'moved_to_verified' | 'no_signal' {
+  if (oldVerdict === newVerdict) {
+    return 'no_signal';
+  }
   // not_applicable rows are non-factual and excluded from feedback learning.
-  if (oldVerdict === "not-applicable" || newVerdict === "not-applicable") {
-    return "no_signal";
+  if (oldVerdict === Verdict.NotApplicable || newVerdict === Verdict.NotApplicable) {
+    return 'no_signal';
   }
-  if (oldVerdict === "verified" && newVerdict !== "verified") {
-    return "moved_away_from_verified";
+  if (oldVerdict === Verdict.Verified && newVerdict !== Verdict.Verified) {
+    return 'moved_away_from_verified';
   }
-  if (oldVerdict !== "verified" && newVerdict === "verified") {
-    return "moved_to_verified";
+  if (oldVerdict !== Verdict.Verified && newVerdict === Verdict.Verified) {
+    return 'moved_to_verified';
   }
   // unverified ↔ disputed shifts carry weak signal — skip.
-  return "no_signal";
+  return 'no_signal';
 }
 
 /**
@@ -53,15 +52,12 @@ function classify(
  *  outcome=held + moved_to_verified → correct
  *  outcome=held + moved_away → incorrect
  */
-function judge(
-  outcome: string,
-  transition: "moved_away_from_verified" | "moved_to_verified",
-): "correct" | "incorrect" {
-  const reporterPredictedFailure = outcome === "failed" || outcome === "partial";
-  if (transition === "moved_away_from_verified") {
-    return reporterPredictedFailure ? "correct" : "incorrect";
+function judge(outcome: string, transition: 'moved_away_from_verified' | 'moved_to_verified'): 'correct' | 'incorrect' {
+  const reporterPredictedFailure = outcome === Outcome.Failed || outcome === Outcome.Partial;
+  if (transition === 'moved_away_from_verified') {
+    return reporterPredictedFailure ? 'correct' : 'incorrect';
   }
-  return reporterPredictedFailure ? "incorrect" : "correct";
+  return reporterPredictedFailure ? 'incorrect' : 'correct';
 }
 
 /**
@@ -78,26 +74,23 @@ export async function recordVerdictTransition(
   newVerdict: Verdict,
 ): Promise<{ updated: number; correct: number; incorrect: number }> {
   const transition = classify(oldVerdict, newVerdict);
-  if (transition === "no_signal") return { updated: 0, correct: 0, incorrect: 0 };
+  if (transition === 'no_signal') {
+    return { updated: 0, correct: 0, incorrect: 0 };
+  }
 
-  const cutoff = new Date(
-    Date.now() - FEEDBACK_LOOKBACK_DAYS * 24 * 3600 * 1000,
-  );
+  const cutoff = new Date(Date.now() - FEEDBACK_LOOKBACK_DAYS * 24 * 3600 * 1000);
 
-  const recent = await db
+  const recent = await getDb()
     .select({
       reporterAgentId: claimFeedback.reporterAgentId,
       outcome: claimFeedback.outcome,
     })
     .from(claimFeedback)
-    .where(
-      and(
-        eq(claimFeedback.claimId, claimId),
-        gte(claimFeedback.createdAt, cutoff),
-      ),
-    );
+    .where(and(eq(claimFeedback.claimId, claimId), gte(claimFeedback.createdAt, cutoff)));
 
-  if (recent.length === 0) return { updated: 0, correct: 0, incorrect: 0 };
+  if (recent.length === 0) {
+    return { updated: 0, correct: 0, incorrect: 0 };
+  }
 
   let correctCount = 0;
   let incorrectCount = 0;
@@ -105,7 +98,7 @@ export async function recordVerdictTransition(
   // Aggregate per-reporter judgments so a reporter who submitted N
   // feedbacks on the same claim doesn't see their authority moved N
   // times in one transition.
-  const perReporter = new Map<string, "correct" | "incorrect">();
+  const perReporter = new Map<string, 'correct' | 'incorrect'>();
   for (const r of recent) {
     const verdict = judge(r.outcome, transition);
     const existing = perReporter.get(r.reporterAgentId);
@@ -113,22 +106,27 @@ export async function recordVerdictTransition(
     // their LATEST predominant signal — but since outcomes don't
     // get a timestamp here, we conservatively skip mixed-signal
     // reporters (count them once, but as their first judgment).
-    if (!existing) perReporter.set(r.reporterAgentId, verdict);
+    if (!existing) {
+      perReporter.set(r.reporterAgentId, verdict);
+    }
   }
 
   for (const [agentId, verdict] of perReporter.entries()) {
-    if (verdict === "correct") correctCount++;
-    else incorrectCount++;
+    if (verdict === 'correct') {
+      correctCount++;
+    } else {
+      incorrectCount++;
+    }
     // EMA update: new = alpha * sample + (1-alpha) * current.
     // Sample is 1 for correct, 0 for incorrect.
-    const sample = verdict === "correct" ? 1 : 0;
-    const incCorrect = verdict === "correct" ? 1 : 0;
-    const incIncorrect = verdict === "correct" ? 0 : 1;
+    const sample = verdict === 'correct' ? 1 : 0;
+    const incCorrect = verdict === 'correct' ? 1 : 0;
+    const incIncorrect = verdict === 'correct' ? 0 : 1;
     // totalFeedbacks must also grow on each judgment, otherwise the
     // CHECK (correct + incorrect <= total) constraint trips when a
     // single claim flips verdict twice and the same feedback gets
     // judged correct + incorrect for total = 1.
-    await db
+    await getDb()
       .insert(agentFeedbackAuthority)
       .values({
         agentId,
@@ -163,7 +161,7 @@ export async function recordVerdictTransition(
       correct: correctCount,
       incorrect: incorrectCount,
     },
-    "agent feedback authority adjusted on verdict transition",
+    'agent feedback authority adjusted on verdict transition',
   );
 
   return {
@@ -178,20 +176,20 @@ export async function recordVerdictTransition(
  * Catches every error and logs at warn so a learning hiccup never
  * blocks verdict commits.
  */
-export function recordVerdictTransitionSafe(
-  claimId: string,
-  oldVerdict: Verdict,
-  newVerdict: Verdict,
-): void {
-  recordVerdictTransition(claimId, oldVerdict, newVerdict).catch((err) => {
-    logger.warn(
-      {
-        claimId,
-        oldVerdict,
-        newVerdict,
-        error: (err as Error).message,
-      },
-      "feedback authority learning failed",
-    );
-  });
+export function recordVerdictTransitionSafe(claimId: string, oldVerdict: Verdict, newVerdict: Verdict): void {
+  void (async () => {
+    try {
+      await recordVerdictTransition(claimId, oldVerdict, newVerdict);
+    } catch (err) {
+      logger.warn(
+        {
+          claimId,
+          oldVerdict,
+          newVerdict,
+          error: (err as Error).message,
+        },
+        'feedback authority learning failed',
+      );
+    }
+  })();
 }

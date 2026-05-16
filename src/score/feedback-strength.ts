@@ -8,7 +8,7 @@
 // substantiated input lands near 1.0. Calibration can move the
 // weights later once a labelled corpus exists.
 
-export interface StrengthInputs {
+interface StrengthInputs {
   counterSourceUrl?: string | null;
   counterSourceUrlInferred?: string | null;
   counterNliScore?: number | null;
@@ -26,29 +26,39 @@ export interface StrengthInputs {
  * gets the 0.3 weight; one that only has the LLM-inferred URL gets
  * 0.15; one with both still gets only 0.3 (no double-credit).
  */
-export function computeFeedbackEvidenceStrength(
-  row: StrengthInputs,
-): number {
+export function computeFeedbackEvidenceStrength(row: StrengthInputs): number {
   let s = 0.1;
 
-  if (row.counterSourceUrl) s += 0.3;
-  else if (row.counterSourceUrlInferred) s += 0.15;
+  if (row.counterSourceUrl) {
+    s += 0.3;
+  } else if (row.counterSourceUrlInferred) {
+    s += 0.15;
+  }
 
   if (row.counterNliScore !== undefined && row.counterNliScore !== null && row.counterNliScore >= 0.7) {
     s += 0.2;
   }
 
-  if (row.failureDimension) s += 0.2;
-  else if (row.failureDimensionInferred) s += 0.1;
+  if (row.failureDimension) {
+    s += 0.2;
+  } else if (row.failureDimensionInferred) {
+    s += 0.1;
+  }
 
-  if (row.contextDomain || row.contextScope) s += 0.1;
+  if (row.contextDomain || row.contextScope) {
+    s += 0.1;
+  }
 
   const hasDirectPt = row.partialTruth !== undefined && row.partialTruth !== null;
-  const hasInferredPt =
-    row.partialTruthInferred !== undefined && row.partialTruthInferred !== null;
-  if (hasDirectPt) s += 0.1;
-  else if (hasInferredPt) s += 0.05;
+  const hasInferredPt = row.partialTruthInferred !== undefined && row.partialTruthInferred !== null;
+  if (hasDirectPt) {
+    s += 0.1;
+  } else if (hasInferredPt) {
+    s += 0.05;
+  }
 
-  if (s > 1) s = 1;
+  if (s > 1) {
+    s = 1;
+  }
   return Number(s.toFixed(3));
 }

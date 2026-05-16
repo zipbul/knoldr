@@ -12,27 +12,16 @@
 // point evidence_strength × agent_feedback_authority will weight
 // claim certainty adjustments.
 
-import { z } from "zod";
-import { ulid } from "ulid";
-import { eq, sql } from "drizzle-orm";
-import { db } from "../../db/connection";
-import {
-  claim,
-  claimFeedback,
-  agentFeedbackAuthority,
-} from "../../db/schema";
-import { logger } from "../../observability/logger";
-import { computeFeedbackEvidenceStrength } from "../../score/feedback-strength";
-import {
-  APPLICATION_METHODS,
-  OUTCOMES,
-  FAILURE_DIMENSIONS,
-} from "../../score/feedback-constants";
-import { enqueueEnrichment } from "../../fqa/queue";
+import { eq, sql } from 'drizzle-orm';
+import { ulid } from 'ulid';
+import { z } from 'zod';
 
-// Re-export for external consumers that already import these from
-// here (back-compat after extraction to feedback-constants.ts).
-export { APPLICATION_METHODS, OUTCOMES, FAILURE_DIMENSIONS };
+import { getDb } from '../../db/connection';
+import { claim, claimFeedback, agentFeedbackAuthority } from '../../db/schema';
+import { enqueueEnrichment } from '../../fqa/queue';
+import { logger } from '../../observability/logger';
+import { ApplicationMethod, EnrichmentStatus, FailureDimension, Outcome } from '../../score/enums';
+import { computeFeedbackEvidenceStrength } from '../../score/feedback-strength';
 
 const claimFeedbackInputSchema = z
   .object({
@@ -43,10 +32,10 @@ const claimFeedbackInputSchema = z
 
     claimId: z.string().min(1).max(200),
     reporterAgentId: z.string().min(1).max(200),
-    applicationMethod: z.enum(APPLICATION_METHODS),
-    outcome: z.enum(OUTCOMES),
+    applicationMethod: z.enum(ApplicationMethod),
+    outcome: z.enum(Outcome),
 
-    failureDimension: z.enum(FAILURE_DIMENSIONS).optional(),
+    failureDimension: z.enum(FailureDimension).optional(),
     partialTruth: z.number().min(0).max(1).optional(),
     contextDomain: z.string().max(100).optional(),
     contextTimeFrom: z.iso.datetime().optional(),
@@ -59,17 +48,14 @@ const claimFeedbackInputSchema = z
   })
   // Held outcomes can't carry a failure dimension — the claim worked
   // as advertised. Failed/partial may but aren't required to.
-  .refine(
-    (v) => !(v.outcome === "held" && v.failureDimension !== undefined),
-    {
-      message: "failureDimension must not be set when outcome='held'",
-      path: ["failureDimension"],
-    },
-  );
+  .refine(v => !(v.outcome === Outcome.Held && v.failureDimension !== undefined), {
+    message: `failureDimension must not be set when outcome='${Outcome.Held}'`,
+    path: ['failureDimension'],
+  });
 
-export type ClaimFeedbackInput = z.infer<typeof claimFeedbackInputSchema>;
+type ClaimFeedbackInput = z.infer<typeof claimFeedbackInputSchema>;
 
-export type ClaimFeedbackResult =
+type ClaimFeedbackResult =
   | {
       ok: true;
       feedbackId: string;
@@ -81,11 +67,7 @@ export type ClaimFeedbackResult =
     }
   | {
       ok: false;
-      error:
-        | "invalid_input"
-        | "claim_not_found"
-        | "feedback_not_found"
-        | "reporter_mismatch";
+      error: 'invalid_input' | 'claim_not_found' | 'feedback_not_found' | 'reporter_mismatch';
       message: string;
       missingRequired?: string[];
     };
@@ -95,7 +77,7 @@ export type ClaimFeedbackResult =
  * direct fields populated (inferred slots are always empty at the
  * point a brand-new feedback row is being inserted).
  */
-export function computeEvidenceStrength(input: ClaimFeedbackInput): number {
+function computeEvidenceStrength(input: ClaimFeedbackInput): number {
   return computeFeedbackEvidenceStrength({
     counterSourceUrl: input.counterSourceUrl ?? null,
     counterNliScore: input.counterNliScore ?? null,
@@ -111,17 +93,19 @@ export function computeEvidenceStrength(input: ClaimFeedbackInput): number {
  * pending → enriched / awaiting_pull / etc. asynchronously. We set
  * the *initial* state here so the queue knows what work to pick up.
  */
-function initialEnrichmentStatus(input: ClaimFeedbackInput, strength: number): string {
+function initialEnrichmentStatus(input: ClaimFeedbackInput, strength: number): EnrichmentStatus {
   // Held outcomes carry no enrichment value — no failure to investigate.
-  if (input.outcome === "held") return "not-needed";
+  if (input.outcome === Outcome.Held) {
+    return EnrichmentStatus.NotNeeded;
+  }
   // Already strong enough that FQA wouldn't ask for more.
-  if (strength >= 0.8) return "not-needed";
-  return "pending";
+  if (strength >= 0.8) {
+    return EnrichmentStatus.NotNeeded;
+  }
+  return EnrichmentStatus.Pending;
 }
 
-export async function handleClaimFeedback(
-  input: Record<string, unknown>,
-): Promise<ClaimFeedbackResult> {
+async function handleClaimFeedback(input: Record<string, unknown>): Promise<ClaimFeedbackResult> {
   let validated: ClaimFeedbackInput;
   try {
     validated = claimFeedbackInputSchema.parse(input);
@@ -136,14 +120,16 @@ export async function handleClaimFeedback(
     // as missing. Now we restrict to issues whose message clearly
     // names "undefined" as the received value.
     const missing = zerr.issues
-      ?.filter((i) => {
-        if (i.code !== "invalid_type") return false;
-        return typeof i.message === "string" && /received\s+undefined/i.test(i.message);
+      ?.filter(i => {
+        if (i.code !== 'invalid_type') {
+          return false;
+        }
+        return typeof i.message === 'string' && /received\s+undefined/i.test(i.message);
       })
-      .map((i) => i.path.join("."));
+      .map(i => i.path.join('.'));
     return {
       ok: false,
-      error: "invalid_input",
+      error: 'invalid_input',
       message: zerr.message,
       missingRequired: missing && missing.length > 0 ? missing : undefined,
     };
@@ -152,16 +138,12 @@ export async function handleClaimFeedback(
   // Confirm the claim exists. FK would catch this at INSERT but
   // doing it up-front lets us return a clean error code rather
   // than a generic 500 from a constraint violation.
-  const [claimRow] = await db
-    .select({ id: claim.id })
-    .from(claim)
-    .where(eq(claim.id, validated.claimId))
-    .limit(1);
+  const [claimRow] = await getDb().select({ id: claim.id }).from(claim).where(eq(claim.id, validated.claimId)).limit(1);
 
   if (!claimRow) {
     return {
       ok: false,
-      error: "claim_not_found",
+      error: 'claim_not_found',
       message: `claim ${validated.claimId} does not exist`,
     };
   }
@@ -183,7 +165,7 @@ export async function handleClaimFeedback(
   // authority) happen inside one transaction. Without this, an
   // insert failure after the upsert leaves totalFeedbacks bumped
   // for a row that never existed, slowly corrupting the counter.
-  await db.transaction(async (tx) => {
+  await getDb().transaction(async tx => {
     // Reporter's authority row — first-contact gets default 0.5;
     // existing rows have totalFeedbacks bumped. correct/incorrect
     // move only when later re-verification confirms or refutes.
@@ -214,12 +196,8 @@ export async function handleClaimFeedback(
       failureDimension: validated.failureDimension ?? null,
       partialTruth: validated.partialTruth ?? null,
       contextDomain: validated.contextDomain ?? null,
-      contextTimeFrom: validated.contextTimeFrom
-        ? new Date(validated.contextTimeFrom)
-        : null,
-      contextTimeUntil: validated.contextTimeUntil
-        ? new Date(validated.contextTimeUntil)
-        : null,
+      contextTimeFrom: validated.contextTimeFrom ? new Date(validated.contextTimeFrom) : null,
+      contextTimeUntil: validated.contextTimeUntil ? new Date(validated.contextTimeUntil) : null,
       contextScope: validated.contextScope ?? null,
       counterSourceUrl: validated.counterSourceUrl ?? null,
       counterClaimText: validated.counterClaimText ?? null,
@@ -229,13 +207,7 @@ export async function handleClaimFeedback(
       evidenceStrength,
     });
 
-    await adjustClaimAuthorityTx(
-      tx,
-      validated.claimId,
-      validated.reporterAgentId,
-      evidenceStrength,
-      validated.outcome,
-    );
+    await adjustClaimAuthorityTx(tx, validated.claimId, validated.reporterAgentId, evidenceStrength, validated.outcome);
   });
 
   // Fire-and-forget immediate enrichment: only when the row actually
@@ -243,13 +215,13 @@ export async function handleClaimFeedback(
   // outcome or already-strong evidence). The handler's response
   // doesn't wait — the agent gets its 100ms ack immediately and the
   // in-process worker drains enrichment in the background.
-  if (enrichmentStatus === "pending") {
+  if (enrichmentStatus === EnrichmentStatus.Pending) {
     enqueueEnrichment(feedbackId);
   }
 
   // Fetch the reporter's current authority for the response so the
   // caller can see how their feedback will be weighted.
-  const [authorityRow] = await db
+  const [authorityRow] = await getDb()
     .select({ fa: agentFeedbackAuthority.feedbackAuthority })
     .from(agentFeedbackAuthority)
     .where(eq(agentFeedbackAuthority.agentId, validated.reporterAgentId))
@@ -264,7 +236,7 @@ export async function handleClaimFeedback(
       evidenceStrength,
       enrichmentStatus,
     },
-    "claim_feedback recorded",
+    'claim_feedback recorded',
   );
 
   return {
@@ -278,10 +250,8 @@ export async function handleClaimFeedback(
   };
 }
 
-async function updateExistingFeedback(
-  input: ClaimFeedbackInput,
-): Promise<ClaimFeedbackResult> {
-  const [row] = await db
+async function updateExistingFeedback(input: ClaimFeedbackInput): Promise<ClaimFeedbackResult> {
+  const [row] = await getDb()
     .select({
       id: claimFeedback.id,
       claimId: claimFeedback.claimId,
@@ -306,15 +276,15 @@ async function updateExistingFeedback(
   if (!row) {
     return {
       ok: false,
-      error: "feedback_not_found",
+      error: 'feedback_not_found',
       message: `feedback ${input.feedbackId} does not exist`,
     };
   }
   if (row.reporterAgentId !== input.reporterAgentId) {
     return {
       ok: false,
-      error: "reporter_mismatch",
-      message: "feedbackId belongs to a different reporter",
+      error: 'reporter_mismatch',
+      message: 'feedbackId belongs to a different reporter',
     };
   }
   // Defense against a reporter sending feedbackId for claim A with
@@ -323,7 +293,7 @@ async function updateExistingFeedback(
   if (row.claimId !== input.claimId) {
     return {
       ok: false,
-      error: "reporter_mismatch",
+      error: 'reporter_mismatch',
       message: "claimId does not match the feedback row's recorded claim",
     };
   }
@@ -331,7 +301,7 @@ async function updateExistingFeedback(
   // a reporter to switch outcome on update would let them flip the
   // sign of the EMA adjustment retroactively. We use row.outcome (the
   // truth at submit time) regardless of what input.outcome says.
-  const effectiveOutcome = row.outcome as "held" | "failed" | "partial";
+  const effectiveOutcome = row.outcome as Outcome;
 
   // Fill NULL direct fields only; preserve set values so a reporter
   // can't rewrite their own history.
@@ -351,10 +321,7 @@ async function updateExistingFeedback(
     failureDimension: merged.failureDimension,
     failureDimensionInferred: row.failureDimensionInferred,
     contextDomain: row.contextDomain,
-    contextScope:
-      row.contextScope && typeof row.contextScope === "object"
-        ? (row.contextScope as Record<string, unknown>)
-        : null,
+    contextScope: row.contextScope && typeof row.contextScope === 'object' ? (row.contextScope as Record<string, unknown>) : null,
     partialTruth: merged.partialTruth,
     partialTruthInferred: row.partialTruthInferred,
   });
@@ -363,11 +330,11 @@ async function updateExistingFeedback(
   // otherwise stay pending for the background worker to revisit.
   // Uses the stored outcome, not the input — see effectiveOutcome.
   const newStatus =
-    effectiveOutcome === "held"
-      ? "not-needed"
+    effectiveOutcome === Outcome.Held
+      ? EnrichmentStatus.NotNeeded
       : newStrength >= 0.8
-        ? "enriched"
-        : "pending";
+        ? EnrichmentStatus.Enriched
+        : EnrichmentStatus.Pending;
 
   // Both writes inside one transaction: feedback row update and
   // claim authority adjustment commit together or not at all.
@@ -375,7 +342,7 @@ async function updateExistingFeedback(
   // authority adjust leaves the row's evidenceStrength advanced
   // but no matching authority movement — silent drift over time.
   const strengthDelta = newStrength - row.evidenceStrength;
-  await db.transaction(async (tx) => {
+  await getDb().transaction(async tx => {
     await tx
       .update(claimFeedback)
       .set({
@@ -391,17 +358,11 @@ async function updateExistingFeedback(
       .where(eq(claimFeedback.id, row.id));
 
     if (strengthDelta !== 0) {
-      await adjustClaimAuthorityTx(
-        tx,
-        row.claimId,
-        input.reporterAgentId,
-        strengthDelta,
-        effectiveOutcome,
-      );
+      await adjustClaimAuthorityTx(tx, row.claimId, input.reporterAgentId, strengthDelta, effectiveOutcome);
     }
   });
 
-  const [authorityRow] = await db
+  const [authorityRow] = await getDb()
     .select({ fa: agentFeedbackAuthority.feedbackAuthority })
     .from(agentFeedbackAuthority)
     .where(eq(agentFeedbackAuthority.agentId, input.reporterAgentId))
@@ -415,7 +376,7 @@ async function updateExistingFeedback(
       newStrength,
       newStatus,
     },
-    "claim_feedback updated by reporter",
+    'claim_feedback updated by reporter',
   );
 
   return {
@@ -440,7 +401,7 @@ async function updateExistingFeedback(
 const FEEDBACK_LEARNING_RATE = 0.05;
 
 // `executor` covers both the top-level db and a drizzle transaction
-// handle. We type loosely so callers from a `db.transaction(tx => ...)`
+// handle. We type loosely so callers from a `getDb().transaction(tx => ...)`
 // callback can pass `tx` directly without TS complaining about the
 // `$client` property that lives only on the top-level instance.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -451,9 +412,11 @@ async function adjustClaimAuthorityTx(
   claimId: string,
   reporterAgentId: string,
   strengthDelta: number,
-  outcome: "held" | "failed" | "partial",
+  outcome: Outcome,
 ): Promise<void> {
-  if (strengthDelta === 0) return;
+  if (strengthDelta === 0) {
+    return;
+  }
 
   const [authRow] = await executor
     .select({ fa: agentFeedbackAuthority.feedbackAuthority })
@@ -462,9 +425,11 @@ async function adjustClaimAuthorityTx(
     .limit(1);
   const reporterAuthority = authRow?.fa ?? 0.5;
 
-  const sign = outcome === "held" ? 1 : -1;
+  const sign = outcome === Outcome.Held ? 1 : -1;
   const delta = sign * strengthDelta * reporterAuthority * FEEDBACK_LEARNING_RATE;
-  if (delta === 0) return;
+  if (delta === 0) {
+    return;
+  }
 
   await executor.execute(sql`
     UPDATE claim
@@ -474,4 +439,4 @@ async function adjustClaimAuthorityTx(
   `);
 }
 
-
+export { handleClaimFeedback };

@@ -12,16 +12,15 @@
 // on noise alone. Set EVAL_FAIL_ON_REGRESSION=1 once the corpus has enough
 // labels for the macro-F1 signal to be stable.
 
-import { runGoldenEval } from "./golden";
-import { logger } from "../observability/logger";
+import { logger } from '../observability/logger';
+import { runGoldenEval } from './golden';
 
 async function main(): Promise<void> {
-  const commitSha =
-    process.env.GITHUB_SHA ?? process.env.GIT_COMMIT ?? undefined;
+  const commitSha = process.env.GITHUB_SHA ?? process.env.GIT_COMMIT ?? undefined;
   const result = await runGoldenEval({ commitSha });
 
   if (!result) {
-    console.log("golden set is empty — add labelled rows to golden_set_claim to begin measurement");
+    console.log('golden set is empty — add labelled rows to golden_set_claim to begin measurement');
     process.exit(0);
   }
 
@@ -31,40 +30,40 @@ async function main(): Promise<void> {
     `macro_p/r/f1  ${result.precisionOverall.toFixed(3)} / ${result.recallOverall.toFixed(3)} / ${result.f1Overall.toFixed(3)}`,
   );
   if (result.baselineRunId) {
-    console.log(`baseline      ${result.baselineRunId}  (regressed=${result.regressed ? "yes" : "no"})`);
+    console.log(`baseline      ${result.baselineRunId}  (regressed=${result.regressed ? 'yes' : 'no'})`);
   } else {
-    console.log("baseline      (none — first run)");
+    console.log('baseline      (none — first run)');
   }
 
-  console.log("");
-  console.log("per-verdict");
+  console.log('');
+  console.log('per-verdict');
   for (const [v, m] of Object.entries(result.byVerdict)) {
-    if (m.support === 0) continue;
+    if (m.support === 0) {
+      continue;
+    }
     console.log(
       `  ${v.padEnd(16)} support=${String(m.support).padStart(4)}  P=${m.precision.toFixed(3)}  R=${m.recall.toFixed(3)}  F1=${m.f1.toFixed(3)}`,
     );
   }
 
-  console.log("");
-  console.log("per-claim-type");
+  console.log('');
+  console.log('per-claim-type');
   for (const [t, m] of Object.entries(result.byType)) {
-    console.log(
-      `  ${t.padEnd(16)} support=${String(m.support).padStart(4)}  acc=${(m.tp / Math.max(1, m.support)).toFixed(3)}`,
-    );
+    console.log(`  ${t.padEnd(16)} support=${String(m.support).padStart(4)}  acc=${(m.tp / Math.max(1, m.support)).toFixed(3)}`);
   }
 
-  const failOnRegression = process.env.EVAL_FAIL_ON_REGRESSION === "1";
+  const failOnRegression = process.env.EVAL_FAIL_ON_REGRESSION === '1';
   if (failOnRegression && result.regressed) {
-    console.error(
-      `\nREGRESSION: macro-F1 dropped vs baseline ${result.baselineRunId}. Failing.`,
-    );
+    console.error(`\nREGRESSION: macro-F1 dropped vs baseline ${result.baselineRunId}. Failing.`);
     process.exit(1);
   }
   process.exit(0);
 }
 
-main().catch((err) => {
-  logger.error({ err: (err as Error).message }, "golden eval CLI failed");
+try {
+  await main();
+} catch (err) {
+  logger.error({ err: (err as Error).message }, 'golden eval CLI failed');
   console.error(`eval failed: ${(err as Error).message}`);
   process.exit(2);
-});
+}

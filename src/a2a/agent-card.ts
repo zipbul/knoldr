@@ -1,24 +1,25 @@
-import type { AgentCard } from "@a2a-js/sdk";
-import pkg from "../../package.json" with { type: "json" };
+import type { AgentCard } from '@a2a-js/sdk';
+
+import pkg from '../../package.json' with { type: 'json' };
 
 export const agentCard: AgentCard = {
-  protocolVersion: "0.3.0",
-  name: "knoldr",
+  protocolVersion: '0.3.0',
+  name: 'knoldr',
   description:
-    "AI-native universal data platform. Searches stored knowledge and auto-collects from the web when results are insufficient. All skills accept JSON input via parts[0].data = { skill, input }.",
-  url: `http://${process.env.KNOLDR_HOST ?? "0.0.0.0"}:${process.env.KNOLDR_PORT ?? "5100"}`,
+    'AI-native universal data platform. Searches stored knowledge and auto-collects from the web when results are insufficient. All skills accept JSON input via parts[0].data = { skill, input }.',
+  url: `http://${process.env.KNOLDR_HOST ?? '0.0.0.0'}:${process.env.KNOLDR_PORT ?? '5100'}`,
   version: pkg.version,
   capabilities: {
     streaming: true,
     pushNotifications: false,
   },
-  defaultInputModes: ["application/json"],
-  defaultOutputModes: ["application/json"],
+  defaultInputModes: ['application/json'],
+  defaultOutputModes: ['application/json'],
   skills: [
     {
-      id: "find",
-      name: "Find",
-      tags: ["search", "query", "research", "retrieve", "explore"],
+      id: 'find',
+      name: 'Find',
+      tags: ['search', 'query', 'research', 'retrieve', 'explore'],
       description: `Search stored knowledge. If results are insufficient, automatically crawls the web to collect new data, then re-searches.
 
 Input: {
@@ -63,9 +64,9 @@ Output: {
       ],
     },
     {
-      id: "feedback",
-      name: "Feedback",
-      tags: ["feedback", "rating", "authority", "rerank"],
+      id: 'feedback',
+      name: 'Feedback',
+      tags: ['feedback', 'rating', 'authority', 'rerank'],
       description: `Record a positive or negative signal against a stored entry. Atomically adjusts the entry's authority score so future \`find\` rankings reflect usage quality.
 
 Input: {
@@ -88,9 +89,9 @@ Output:
       ],
     },
     {
-      id: "claim_feedback",
-      name: "Claim Feedback",
-      tags: ["feedback", "claim", "verification", "fact-quality"],
+      id: 'claim_feedback',
+      name: 'Claim Feedback',
+      tags: ['feedback', 'claim', 'verification', 'fact-quality'],
       description: `Record claim-level structured feedback. Distinct from the entry-level \`feedback\` skill: this one targets a specific atomic claim and captures HOW the claim was applied, the OUTCOME, and WHICH dimension failed if it did. The reporter agent supplies its own ID; a feedback_authority score is maintained per reporter and weights how much future submissions can move claim certainty.
 
 Input: {
@@ -145,9 +146,9 @@ Notes:
       ],
     },
     {
-      id: "neighbors",
-      name: "Entity Neighbors",
-      tags: ["kg", "graph", "entity"],
+      id: 'neighbors',
+      name: 'Entity Neighbors',
+      tags: ['kg', 'graph', 'entity'],
       description: `Walk the entity KG from a root entity. Returns connected entities up to \`hops\` away, each tagged with its shortest distance and the relation labels on the path.
 
 Input:  { entity: string, entityType?: string, relationType?: string, hops?: number (1-4, default 1), limit?: number (default 50) }
@@ -164,22 +165,20 @@ list of candidates so the caller can re-issue with entityType set.`,
       ],
     },
     {
-      id: "provenance",
-      name: "Claim Provenance",
-      tags: ["kg", "graph", "claim", "provenance"],
+      id: 'provenance',
+      name: 'Claim Provenance',
+      tags: ['kg', 'graph', 'claim', 'provenance'],
       description: `Walk the \`derives_from\` chain from a claim back to its supporting ancestors. Each ancestor carries its statement, verdict, certainty, and source URL.
 
 Input:  { claimId: string, maxDepth?: number (1-8, default 4) }
 Output: { ok, rootClaimId, ancestors: [{ claimId, statement, verdict, certainty, sourceUrl, depth }] }
         | { ok: false, error: "invalid_input"|"claim_not_found", message }`,
-      examples: [
-        '{ "skill": "provenance", "input": { "claimId": "01HX..." } }',
-      ],
+      examples: ['{ "skill": "provenance", "input": { "claimId": "01HX..." } }'],
     },
     {
-      id: "ingest",
-      name: "Ingest",
-      tags: ["ingest", "submit", "multimodal", "write"],
+      id: 'ingest',
+      name: 'Ingest',
+      tags: ['ingest', 'submit', 'multimodal', 'write'],
       description: `Submit pre-extracted text into Knoldr. Multimodal entry point: the agent owns format conversion (PDF parsing, OCR, ASR, local file read) and then hands plain text to Knoldr. Two modes:
 
 Mode 1 — raw text (unstructured):
@@ -194,9 +193,9 @@ Mode 2 — pre-structured entries:
   Skips decompose; ideal when the caller has already classified material.
 
 Source schema:
-  { url, sourceType: "official_docs"|"github_release"|"cve_db"|"official_blog"|
-                    "research_paper"|"established_blog"|"community_forum"|
-                    "personal_blog"|"ai_generated"|"unknown",
+  { url, sourceType: "official-docs"|"github-release"|"cve-db"|"official-blog"|
+                    "research-paper"|"established-blog"|"community-forum"|
+                    "personal-blog"|"ai-generated"|"reference-wiki"|"unknown",
     trust?: 0-1 }
 
 Output:
@@ -211,14 +210,14 @@ Notes:
   - Rejected rows include a reason (e.g. decompose_failed, embedding_failed,
     low_quality_content).`,
       examples: [
-        '{ "skill": "ingest", "input": { "raw": "GPT-4 was released in March 2023...", "sources": [{ "url": "https://openai.com/blog/gpt-4", "sourceType": "official_blog" }] } }',
+        '{ "skill": "ingest", "input": { "raw": "GPT-4 was released in March 2023...", "sources": [{ "url": "https://openai.com/blog/gpt-4", "sourceType": "official-blog" }] } }',
         '{ "skill": "ingest", "input": { "entries": [{ "title": "xz-utils backdoor", "content": "A backdoor was discovered...", "domain": ["security"], "tags": ["cve", "supply-chain"] }] } }',
       ],
     },
     {
-      id: "contradictions",
-      name: "Surface Contradictions",
-      tags: ["kg", "graph", "claim", "dispute"],
+      id: 'contradictions',
+      name: 'Surface Contradictions',
+      tags: ['kg', 'graph', 'claim', 'dispute'],
       description: `Surface CONTRADICTS edges for either a specific claim or an entity-shaped area of the graph. Always returns claim PAIRS so the agent sees both sides of the dispute.
 
 Input: { claimId?: string, entity?: string, limit?: number }   // one of claimId/entity required

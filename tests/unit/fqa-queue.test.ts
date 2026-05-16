@@ -1,9 +1,10 @@
-import { describe, test, expect, mock } from "bun:test";
-import { enqueueEnrichment, pendingCount } from "../../src/fqa/queue";
+import { describe, test, expect, mock } from 'bun:test';
+
+import { enqueueEnrichment, pendingCount } from '../../src/fqa/queue';
 
 // Mock runEnrichment so the queue test doesn't hit the DB.
 const calls: string[] = [];
-mock.module("../../src/fqa/enrich", () => ({
+mock.module('../../src/fqa/enrich', () => ({
   runEnrichment: async (id: string) => {
     calls.push(id);
     return null;
@@ -14,31 +15,36 @@ mock.module("../../src/fqa/enrich", () => ({
   expireStalePullTasks: async () => 0,
 }));
 
-describe("fqa queue — event-driven drain", () => {
-  test("enqueue dispatches in order, idle when drained", async () => {
+// Polls `pendingCount()` until the queue is empty or the timeout
+// elapses. Extracted into a helper so the wait-for-drain pattern
+// doesn't appear as a conditional inside `test(...)` bodies — the
+// jest rule flags any `if`/`for` inside a test callback, even one
+// that's clearly fixture-side.
+async function drain(): Promise<void> {
+  const start = Date.now();
+  while (pendingCount() > 0 && Date.now() - start < 50) {
+    await new Promise(r => setTimeout(r, 5));
+  }
+}
+
+describe('fqa queue — event-driven drain', () => {
+  test('enqueue dispatches in order, idle when drained', async () => {
     calls.length = 0;
-    enqueueEnrichment("a");
-    enqueueEnrichment("b");
-    enqueueEnrichment("c");
-    // Worker drains as a microtask chain; wait for it.
-    for (let i = 0; i < 10 && pendingCount() > 0; i++) {
-      await new Promise((r) => setTimeout(r, 5));
-    }
-    expect(calls).toEqual(["a", "b", "c"]);
+    enqueueEnrichment('a');
+    enqueueEnrichment('b');
+    enqueueEnrichment('c');
+    await drain();
+    expect(calls).toEqual(['a', 'b', 'c']);
     expect(pendingCount()).toBe(0);
   });
 
-  test("subsequent enqueue restarts the drainer", async () => {
+  test('subsequent enqueue restarts the drainer', async () => {
     calls.length = 0;
-    enqueueEnrichment("x");
-    for (let i = 0; i < 10 && pendingCount() > 0; i++) {
-      await new Promise((r) => setTimeout(r, 5));
-    }
-    expect(calls).toEqual(["x"]);
-    enqueueEnrichment("y");
-    for (let i = 0; i < 10 && pendingCount() > 0; i++) {
-      await new Promise((r) => setTimeout(r, 5));
-    }
-    expect(calls).toEqual(["x", "y"]);
+    enqueueEnrichment('x');
+    await drain();
+    expect(calls).toEqual(['x']);
+    enqueueEnrichment('y');
+    await drain();
+    expect(calls).toEqual(['x', 'y']);
   });
 });

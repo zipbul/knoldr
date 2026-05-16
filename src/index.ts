@@ -1,9 +1,9 @@
-import { startServer } from "./a2a/server";
-import { startFqaWorkers } from "./fqa/workers";
-import { logger } from "./observability/logger";
-import { configureOnnxRuntime } from "./llm/onnx-env";
+import { startServer } from './a2a/server';
+import { startFqaWorkers } from './fqa/workers';
+import { configureOnnxRuntime } from './llm/onnx-env';
+import { logger } from './observability/logger';
 
-logger.info("knoldr starting");
+logger.info('knoldr starting');
 
 // Configure onnxruntime thread pool BEFORE any model import so the
 // setting takes effect on the first NLI / reranker / QA load.

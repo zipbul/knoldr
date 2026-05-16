@@ -11,19 +11,15 @@
 // dropped silently so callers don't have to filter their own claim id
 // out of a candidate list.
 
-import { ulid } from "ulid";
-import { db } from "../db/connection";
-import { claimRelation } from "../db/schema";
-import { logger } from "../observability/logger";
+import { ulid } from 'ulid';
 
-export type ClaimRelationType =
-  | "supports"
-  | "contradicts"
-  | "derives-from"
-  | "superseded-by"
-  | "refines";
+import { getDb } from '../db/connection';
+import { claimRelation } from '../db/schema';
+import { logger } from '../observability/logger';
 
-export interface WriteEdgesOptions {
+type ClaimRelationType = 'supports' | 'contradicts' | 'derives-from' | 'superseded-by' | 'refines';
+
+interface WriteEdgesOptions {
   weight?: number; // default 1.0
   createdBy?: string; // default 'auto'
   metadata?: Record<string, unknown>;
@@ -35,17 +31,19 @@ export async function writeClaimEdges(
   relationType: ClaimRelationType,
   opts: WriteEdgesOptions = {},
 ): Promise<number> {
-  if (targetClaimIds.length === 0) return 0;
-  const distinct = Array.from(new Set(targetClaimIds)).filter(
-    (id) => id && id !== sourceClaimId,
-  );
-  if (distinct.length === 0) return 0;
+  if (targetClaimIds.length === 0) {
+    return 0;
+  }
+  const distinct = Array.from(new Set(targetClaimIds)).filter(id => id && id !== sourceClaimId);
+  if (distinct.length === 0) {
+    return 0;
+  }
 
   const weight = opts.weight ?? 1.0;
-  const createdBy = opts.createdBy ?? "auto";
+  const createdBy = opts.createdBy ?? 'auto';
   const metadata = opts.metadata ?? null;
 
-  const values = distinct.map((targetId) => ({
+  const values = distinct.map(targetId => ({
     id: ulid(),
     sourceClaimId,
     targetClaimId: targetId,
@@ -56,15 +54,11 @@ export async function writeClaimEdges(
   }));
 
   try {
-    const inserted = await db
+    const inserted = await getDb()
       .insert(claimRelation)
       .values(values)
       .onConflictDoNothing({
-        target: [
-          claimRelation.sourceClaimId,
-          claimRelation.targetClaimId,
-          claimRelation.relationType,
-        ],
+        target: [claimRelation.sourceClaimId, claimRelation.targetClaimId, claimRelation.relationType],
       })
       .returning({ id: claimRelation.id });
 
@@ -77,7 +71,7 @@ export async function writeClaimEdges(
           inserted: inserted.length,
           createdBy,
         },
-        "claim_relation edges written",
+        'claim_relation edges written',
       );
     }
     return inserted.length;
@@ -92,19 +86,8 @@ export async function writeClaimEdges(
         targets: distinct.length,
         error: (err as Error).message,
       },
-      "claim_relation edge write failed (likely FK violation)",
+      'claim_relation edge write failed (likely FK violation)',
     );
     return 0;
   }
-}
-
-/** Convenience for the common 1-target case. */
-export async function writeClaimEdge(
-  sourceClaimId: string,
-  targetClaimId: string,
-  relationType: ClaimRelationType,
-  opts: WriteEdgesOptions = {},
-): Promise<boolean> {
-  const n = await writeClaimEdges(sourceClaimId, [targetClaimId], relationType, opts);
-  return n > 0;
 }

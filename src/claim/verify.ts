@@ -1,40 +1,39 @@
-import { eq, sql, and } from "drizzle-orm";
-import { ulid } from "ulid";
-import { db } from "../db/connection";
-import { claim, verifyQueue, entry, entryScore, entrySource } from "../db/schema";
-import { nliScore, type NliScores } from "../llm/nli";
-import { fetchSource, selectRelevantChunks, type FetchedSource } from "./source-fetch";
-import { checkKgContradiction, type KgContradiction } from "../kg/contradiction";
-import { expandWithKgFacts } from "../kg/expand";
-import { decomposeClaim } from "./cove";
-import { webSearch } from "./web-search";
-import { getSpecializedHits } from "./specialized-retrieval";
-import { authorityFor } from "./authority";
-import { recordVerdictTransitionSafe } from "./authority-learn";
-import { writeClaimEdges } from "./relation-writer";
-import { extractClaimYear, isSourceTooOld } from "./time-aware";
-import { getCurrentThresholds } from "./calibration";
-import { aggregate, type SourceEvidence } from "./aggregator";
-import { fingerprint, type SourceFingerprint } from "./independence";
+import { eq, sql, and } from 'drizzle-orm';
+import { ulid } from 'ulid';
+
+import { getDb } from '../db/connection';
+import { claim, verifyQueue, entry, entryScore, entrySource } from '../db/schema';
+import { checkKgContradiction, type KgContradiction } from '../kg/contradiction';
+import { expandWithKgFacts } from '../kg/expand';
+import { bespokeCheck } from '../llm/bespoke-check';
+import { qaVerify } from '../llm/docqa';
+import { nliScore, type NliScores } from '../llm/nli';
+import { logger } from '../observability/logger';
+import { verifyVerdicts, verifyErrors, verifyStageLatency } from '../observability/metrics';
+import { ClaimType, EntryScoreDimension, EvidenceSource, RelationType, Verdict, VerdictTrigger } from '../score/enums';
+import { aggregate, type SourceEvidence } from './aggregator';
+import { authorityFor } from './authority';
+import { recordVerdictTransitionSafe } from './authority-learn';
+import { getCurrentThresholds } from './calibration';
+import { counterSearch } from './counter-search';
+import { decomposeClaim } from './cove';
+import { fingerprint, type SourceFingerprint } from './independence';
+import { hasNegation, NEGATION_DAMPING } from './negation';
 // Verify pipeline now uses independence grouping via an internal
 // union-find (`assignIndependenceGroups` below); the `independentCount`
 // helper is no longer called directly. Keep the import path documented
 // in the accompanying comment in case a future sweep wants to surface
 // the raw count via metrics.
-import { numericContradicts } from "./numeric";
-import { hasNegation, NEGATION_DAMPING } from "./negation";
-import { counterSearch } from "./counter-search";
-import { qaVerify } from "../llm/docqa";
-import { bespokeCheck } from "../llm/bespoke-check";
-import { verifyVerdicts, verifyErrors, verifyStageLatency } from "../observability/metrics";
-import { logger } from "../observability/logger";
-
-const VERDICTS = ["verified", "disputed", "unverified", "not-applicable"] as const;
-type Verdict = (typeof VERDICTS)[number];
+import { numericContradicts } from './numeric';
+import { writeClaimEdges } from './relation-writer';
+import { fetchSource, selectRelevantChunks, type FetchedSource } from './source-fetch';
+import { getSpecializedHits } from './specialized-retrieval';
+import { extractClaimYear, isSourceTooOld } from './time-aware';
+import { webSearch } from './web-search';
 
 interface SourceCheckResult {
   url: string;
-  status: FetchedSource["status"];
+  status: FetchedSource['status'];
   scores?: NliScores;
   authority?: number;
   publishedTime?: string;
@@ -46,15 +45,15 @@ interface SubClaimResult {
   statement: string;
   verdict: Verdict;
   certainty: number;
-  via: "kg-contradiction" | "source-check" | "unverified";
+  via: EvidenceSource.KgContradiction | EvidenceSource.SourceCheck | Verdict.Unverified;
   scores?: NliScores;
 }
 
-export interface VerifyResult {
+interface VerifyResult {
   verdict: Verdict;
   certainty: number;
   evidence: {
-    source: "db-cross-ref" | "kg-contradiction" | "source-check" | "cove" | "exhausted-pipeline" | "exception-finalize";
+    source: EvidenceSource;
     corroborations?: number;
     contradictions?: number;
     rationale?: string;
@@ -95,13 +94,13 @@ const SOURCE_CHECK_MAX_URLS = 5;
  *      swap for Pyreez's real multi-model deliberation once the package
  *      is wired in directly (see DESIGN.md:231 "Pyreez 검증 도구").
  */
-export async function verifyClaim(claimId: string): Promise<VerifyResult | null> {
+async function verifyClaim(claimId: string): Promise<VerifyResult | null> {
   const result = await verifyClaimInner(claimId);
   return result;
 }
 
 async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
-  const [row] = await db
+  const [row] = await getDb()
     .select({
       statement: claim.statement,
       entryId: claim.entryId,
@@ -112,9 +111,11 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
     .where(eq(claim.id, claimId))
     .limit(1);
 
-  if (!row) return null;
+  if (!row) {
+    return null;
+  }
 
-  const crossRefTimer = verifyStageLatency.startTimer({ stage: "db-cross-ref" });
+  const crossRefTimer = verifyStageLatency.startTimer({ stage: EvidenceSource.DbCrossRef });
   const crossRef = await dbCrossRef(claimId, row.entryId, row.embedding);
   crossRefTimer();
 
@@ -130,12 +131,14 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
   // already carries some.
   const MAX_CONTRADICT_EDGES = 8;
   const withCrossRef = (r: VerifyResult | null): VerifyResult | null => {
-    if (!r) return null;
-    if (crossRef.contradictingIds.length === 0) return r;
+    if (!r) {
+      return null;
+    }
+    if (crossRef.contradictingIds.length === 0) {
+      return r;
+    }
     const existing = r.evidence.contradictingClaimIds ?? [];
-    const merged = Array.from(
-      new Set([...existing, ...crossRef.contradictingIds]),
-    ).slice(0, MAX_CONTRADICT_EDGES);
+    const merged = Array.from(new Set([...existing, ...crossRef.contradictingIds])).slice(0, MAX_CONTRADICT_EDGES);
     return {
       ...r,
       evidence: {
@@ -145,15 +148,12 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
     };
   };
 
-  if (
-    crossRef.corroborations >= CROSS_REF_MIN_CORROBORATIONS &&
-    crossRef.contradictions === 0
-  ) {
+  if (crossRef.corroborations >= CROSS_REF_MIN_CORROBORATIONS && crossRef.contradictions === 0) {
     return withCrossRef({
-      verdict: "verified",
+      verdict: Verdict.Verified,
       certainty: 0.6,
       evidence: {
-        source: "db-cross-ref",
+        source: EvidenceSource.DbCrossRef,
         corroborations: crossRef.corroborations,
         contradictions: crossRef.contradictions,
         // Cap to 5 SUPPORTS edges per claim so high-corroboration
@@ -170,47 +170,38 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
   // NLI model misses (e.g. "Bun runs on V8" against KG saying
   // "Bun runs_on JSCore"). Free signal — costs one LLM extraction
   // call but skips both source fetch and jury when it fires.
-  const kgTimer = verifyStageLatency.startTimer({ stage: "kg-contradiction" });
+  const kgTimer = verifyStageLatency.startTimer({ stage: EvidenceSource.KgContradiction });
   const kgConflict = await checkKgContradiction(row.statement);
   kgTimer();
   if (kgConflict && kgConflict.confidence >= 0.7) {
     // Flatten every supporting claim id across all conflicting
     // objects into CONTRADICTS targets. Cap at 10 per claim so a
     // popular subject doesn't write a hundred edges per detection.
-    const contradictingClaimIds = Array.from(
-      new Set(
-        kgConflict.conflictingObjects.flatMap((co) => co.claimIds),
-      ),
-    ).slice(0, 10);
+    const contradictingClaimIds = Array.from(new Set(kgConflict.conflictingObjects.flatMap(co => co.claimIds))).slice(0, 10);
     return withCrossRef({
-      verdict: "disputed",
+      verdict: Verdict.Disputed,
       certainty: kgConflict.confidence,
       evidence: {
-        source: "kg-contradiction",
+        source: EvidenceSource.KgContradiction,
         kgConflict,
         contradictingClaimIds,
       },
     });
   }
 
-  const sources = await db
+  const sources = await getDb()
     .select({ url: entrySource.url })
     .from(entrySource)
-    .where(
-      and(
-        eq(entrySource.entryId, row.entryId),
-        eq(entrySource.entryCreatedAt, row.entryCreatedAt),
-      ),
-    );
+    .where(and(eq(entrySource.entryId, row.entryId), eq(entrySource.entryCreatedAt, row.entryCreatedAt)));
 
-  const sourceUrls = sources.map((s) => s.url).slice(0, SOURCE_CHECK_MAX_URLS);
+  const sourceUrls = sources.map(s => s.url).slice(0, SOURCE_CHECK_MAX_URLS);
 
   // Source-grounded NLI: fetch each entry source, run DeBERTa-FEVER on
   // the most relevant window. This is the strongest signal available —
   // calibrated entailment probability against the actual cited source,
   // not the LLM's prior knowledge.
   if (sourceUrls.length > 0) {
-    const sourceTimer = verifyStageLatency.startTimer({ stage: "source-check" });
+    const sourceTimer = verifyStageLatency.startTimer({ stage: EvidenceSource.SourceCheck });
     const sourceCheck = await runSourceCheck(row.statement, sourceUrls);
     sourceTimer();
     if (sourceCheck) {
@@ -219,15 +210,15 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
       // sources are real (especially for tech blog cargo-cult
       // claims) and a single authoritative contradiction here
       // saves a false positive in production.
-      if (sourceCheck.verdict === "verified") {
+      if (sourceCheck.verdict === Verdict.Verified) {
         const counter = await counterSearch(row.statement);
         if (counter?.triggered) {
           return withCrossRef({
-            verdict: "disputed",
+            verdict: Verdict.Disputed,
             certainty: counter.contradiction,
             evidence: {
               ...sourceCheck.evidence,
-              source: "source-check",
+              source: EvidenceSource.SourceCheck,
               rationale: `counter-search refuted at ${counter.url} (contradiction=${counter.contradiction.toFixed(2)})`,
             },
           });
@@ -243,7 +234,9 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
     // that clearly fails — e.g. "Bun runs on V8" splits into "Bun
     // is a JS runtime" (entailed) and "Bun's engine is V8" (refuted).
     const cove = await runCoveVerification(row.statement, sourceUrls);
-    if (cove) return withCrossRef(cove);
+    if (cove) {
+      return withCrossRef(cove);
+    }
   }
 
   // No usable cited sources (or all inconclusive). Pull external
@@ -259,14 +252,18 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
   // we accept more candidates to give the Bayesian aggregator
   // enough independent groups to overcome individual misses.
   const externalUrls = [...specialized, ...web]
-    .map((r) => r.url)
+    .map(r => r.url)
     .filter((u, i, arr) => arr.indexOf(u) === i)
     .slice(0, 8);
   if (externalUrls.length > 0) {
     const webCheck = await runSourceCheck(row.statement, externalUrls);
-    if (webCheck) return withCrossRef(webCheck);
+    if (webCheck) {
+      return withCrossRef(webCheck);
+    }
     const webCove = await runCoveVerification(row.statement, externalUrls);
-    if (webCove) return withCrossRef(webCove);
+    if (webCove) {
+      return withCrossRef(webCove);
+    }
   }
 
   // No conclusive evidence found anywhere. Return null so caller
@@ -286,12 +283,11 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
  * conjunction). All verified → parent verified. Otherwise → null
  * so the caller can fall back to the LLM jury.
  */
-async function runCoveVerification(
-  statement: string,
-  sourceUrls: string[],
-): Promise<VerifyResult | null> {
+async function runCoveVerification(statement: string, sourceUrls: string[]): Promise<VerifyResult | null> {
   const subclaims = await decomposeClaim(statement);
-  if (subclaims.length === 0) return null;
+  if (subclaims.length === 0) {
+    return null;
+  }
 
   const subResults: SubClaimResult[] = [];
   for (const sc of subclaims) {
@@ -299,9 +295,9 @@ async function runCoveVerification(
     if (kg && kg.confidence >= 0.7) {
       subResults.push({
         statement: sc,
-        verdict: "disputed",
+        verdict: Verdict.Disputed,
         certainty: kg.confidence,
-        via: "kg-contradiction",
+        via: EvidenceSource.KgContradiction,
       });
       continue;
     }
@@ -311,40 +307,40 @@ async function runCoveVerification(
         statement: sc,
         verdict: sc_check.verdict,
         certainty: sc_check.certainty,
-        via: "source-check",
+        via: EvidenceSource.SourceCheck,
         scores: sc_check.evidence.sourceChecks?.[0]?.scores,
       });
     } else {
       subResults.push({
         statement: sc,
-        verdict: "unverified",
+        verdict: Verdict.Unverified,
         certainty: 0,
-        via: "unverified",
+        via: Verdict.Unverified,
       });
     }
   }
 
-  const disputed = subResults.filter((s) => s.verdict === "disputed");
-  const verified = subResults.filter((s) => s.verdict === "verified");
+  const disputed = subResults.filter(s => s.verdict === Verdict.Disputed);
+  const verified = subResults.filter(s => s.verdict === Verdict.Verified);
 
   // Single disputed sub-claim is sufficient — the original claim's
   // truth requires every component to hold.
   if (disputed.length > 0) {
-    const maxCert = Math.max(...disputed.map((d) => d.certainty));
+    const maxCert = Math.max(...disputed.map(d => d.certainty));
     return {
-      verdict: "disputed",
+      verdict: Verdict.Disputed,
       certainty: maxCert,
-      evidence: { source: "cove", subClaims: subResults, sourceUrls },
+      evidence: { source: EvidenceSource.Cove, subClaims: subResults, sourceUrls },
     };
   }
   // All sub-claims verified: take the lowest certainty as the parent
   // certainty (chain is only as strong as its weakest link).
   if (verified.length === subResults.length) {
-    const minCert = Math.min(...verified.map((v) => v.certainty));
+    const minCert = Math.min(...verified.map(v => v.certainty));
     return {
-      verdict: "verified",
+      verdict: Verdict.Verified,
       certainty: minCert,
-      evidence: { source: "cove", subClaims: subResults, sourceUrls },
+      evidence: { source: EvidenceSource.Cove, subClaims: subResults, sourceUrls },
     };
   }
   // Mixed verified + unverified: not enough evidence to commit.
@@ -357,10 +353,7 @@ async function runCoveVerification(
  * source is neutral / unfetchable so the caller can fall back to LLM
  * jury.
  */
-async function runSourceCheck(
-  statement: string,
-  urls: string[],
-): Promise<VerifyResult | null> {
+async function runSourceCheck(statement: string, urls: string[]): Promise<VerifyResult | null> {
   const checks: SourceCheckResult[] = [];
   const evidences: EvidenceWithFingerprint[] = [];
 
@@ -391,10 +384,10 @@ async function runSourceCheck(
     // contradictions when an old article describes a now-superseded
     // state of the world.
     if (isSourceTooOld(fetched.publishedTime, claimYear)) {
-      checks.push({ ...check, status: "blocked_type" });
+      checks.push({ ...check, status: 'blocked_type' });
       continue;
     }
-    if (fetched.status === "ok" && fetched.text) {
+    if (fetched.status === 'ok' && fetched.text) {
       const chunks = await selectRelevantChunks(fetched.text, statement);
       // Per-source: take the chunk with the strongest *net* signal.
       // Cross-source aggregation is handled below by the Bayesian
@@ -402,7 +395,7 @@ async function runSourceCheck(
       // weighted by authority and damped by independence groups.
       let bestChunk: NliScores = { entailment: 0, neutral: 1, contradiction: 0 };
       let bestNet = -Infinity;
-      let bestText = "";
+      let bestText = '';
       let numericOverride = false;
       for (const c of chunks) {
         const premise = kgPrefix ? `${kgPrefix}${c}` : c;
@@ -412,9 +405,7 @@ async function runSourceCheck(
         // refuting regardless of what NLI says about the surrounding
         // prose. Force max contradiction; preserve the chunk text
         // so the citation surface still shows the offending number.
-        const effective = numericContradicts(statement, premise)
-          ? { entailment: 0, neutral: 0, contradiction: 1 }
-          : s;
+        const effective = numericContradicts(statement, premise) ? { entailment: 0, neutral: 0, contradiction: 1 } : s;
         const net = Math.abs(effective.entailment - effective.contradiction);
         if (net > bestNet) {
           bestNet = net;
@@ -433,7 +424,7 @@ async function runSourceCheck(
       // sentence when possible — that's the actual supporting /
       // refuting line worth showing to a reader.
       check.citation = pickCitationSentence(bestText, statement) ?? bestText.slice(0, 400);
-      const fp = fingerprint(url, fetched.title ?? "", fetched.text);
+      const fp = fingerprint(url, fetched.title ?? '', fetched.text);
       evidences.push({
         scores: bestChunk,
         authority: check.authority ?? 0.5,
@@ -444,7 +435,9 @@ async function runSourceCheck(
     checks.push(check);
   }
 
-  if (evidences.length === 0) return null;
+  if (evidences.length === 0) {
+    return null;
+  }
 
   // Use independence.ts's transitive grouping (domain match / title
   // match / hamming<4 on simhash) rather than the prior strict
@@ -454,16 +447,16 @@ async function runSourceCheck(
   // cluster label here so the aggregator's damping kicks in.
   assignIndependenceGroups(evidences);
 
-  const agg = aggregate(
-    evidences.map((e) => ({ scores: e.scores, authority: e.authority, group: e.group })),
-  );
+  const agg = aggregate(evidences.map(e => ({ scores: e.scores, authority: e.authority, group: e.group })));
 
   // Negation damping. NLI flips unreliably on negated claims, so we
   // damp the aggregated certainty before threshold checks; a
   // borderline negated claim should fall through to CoVe / web
   // search rather than commit on weak signal.
   let damped = agg.certainty;
-  if (hasNegation(statement)) damped *= NEGATION_DAMPING;
+  if (hasNegation(statement)) {
+    damped *= NEGATION_DAMPING;
+  }
 
   // Borderline confidence (0.4-0.7) → escalate with two extra
   // verifiers and use majority signal:
@@ -476,13 +469,9 @@ async function runSourceCheck(
   // When both extra signals agree with NLI we boost certainty;
   // when they split, we damp.
   if (damped >= 0.4 && damped < 0.7 && evidences.length > 0) {
-    const topEvidence = evidences.reduce((a, b) =>
-      a.scores.entailment > b.scores.entailment ? a : b,
-    );
-    const topUrl = checks.find((c) => c.scores === topEvidence.scores)?.url;
-    const topText = topUrl
-      ? checks.find((c) => c.url === topUrl)?.citation ?? ""
-      : "";
+    const topEvidence = evidences.reduce((a, b) => (a.scores.entailment > b.scores.entailment ? a : b));
+    const topUrl = checks.find(c => c.scores === topEvidence.scores)?.url;
+    const topText = topUrl ? (checks.find(c => c.url === topUrl)?.citation ?? '') : '';
     if (topText) {
       try {
         const [qa, bespoke] = await Promise.all([
@@ -494,21 +483,29 @@ async function runSourceCheck(
         const nliSupports = topEvidence.scores.entailment > topEvidence.scores.contradiction;
         if (qa) {
           votes++;
-          if (qa.supports === nliSupports) agree++;
+          if (qa.supports === nliSupports) {
+            agree++;
+          }
         }
         if (bespoke) {
           votes++;
-          if (bespoke.supported === nliSupports) agree++;
+          if (bespoke.supported === nliSupports) {
+            agree++;
+          }
         }
         if (votes > 0) {
           const agreementRate = agree / votes;
           // 100% agree → +0.15 boost; 0% (unanimous against) → ×0.5
-          if (agreementRate === 1) damped = Math.min(0.95, damped + 0.15);
-          else if (agreementRate === 0) damped *= 0.5;
-          else damped *= 0.85;
+          if (agreementRate === 1) {
+            damped = Math.min(0.95, damped + 0.15);
+          } else if (agreementRate === 0) {
+            damped *= 0.5;
+          } else {
+            damped *= 0.85;
+          }
         }
       } catch (err) {
-        logger.debug({ error: (err as Error).message }, "QA/Bespoke escalation failed");
+        logger.debug({ error: (err as Error).message }, 'QA/Bespoke escalation failed');
       }
     }
   }
@@ -517,14 +514,20 @@ async function runSourceCheck(
   // Honor calibrated thresholds when they're stricter than the
   // posterior cutoffs baked into the aggregator. Calibration drives
   // the verdict floor; aggregator decides direction + magnitude.
-  if (agg.verdict === "verified" && damped < thresholds.support) return null;
-  if (agg.verdict === "disputed" && damped < thresholds.refute) return null;
-  if (agg.verdict === "unverified") return null;
+  if (agg.verdict === Verdict.Verified && damped < thresholds.support) {
+    return null;
+  }
+  if (agg.verdict === Verdict.Disputed && damped < thresholds.refute) {
+    return null;
+  }
+  if (agg.verdict === Verdict.Unverified) {
+    return null;
+  }
 
   return {
     verdict: agg.verdict,
     certainty: damped,
-    evidence: { source: "source-check", sourceChecks: checks, sourceUrls: urls },
+    evidence: { source: EvidenceSource.SourceCheck, sourceChecks: checks, sourceUrls: urls },
   };
 }
 
@@ -550,7 +553,9 @@ function assignIndependenceGroups(evidences: EvidenceWithFingerprint[]): void {
   const union = (a: number, b: number): void => {
     const ra = find(a);
     const rb = find(b);
-    if (ra !== rb) parent[ra] = rb;
+    if (ra !== rb) {
+      parent[ra] = rb;
+    }
   };
   const hamming = (a: bigint, b: bigint): number => {
     let x = a ^ b;
@@ -569,14 +574,18 @@ function assignIndependenceGroups(evidences: EvidenceWithFingerprint[]): void {
         (fi.domain && fi.domain === fj.domain) ||
         (fi.titleNorm.length > 4 && fi.titleNorm === fj.titleNorm) ||
         hamming(fi.simhash, fj.simhash) < 4;
-      if (same) union(i, j);
+      if (same) {
+        union(i, j);
+      }
     }
   }
   // Re-label roots to a dense [0..k-1] range.
   const dense = new Map<number, number>();
   for (let i = 0; i < evidences.length; i++) {
     const r = find(i);
-    if (!dense.has(r)) dense.set(r, dense.size);
+    if (!dense.has(r)) {
+      dense.set(r, dense.size);
+    }
     evidences[i]!.group = dense.get(r)!;
   }
 }
@@ -589,18 +598,24 @@ function assignIndependenceGroups(evidences: EvidenceWithFingerprint[]): void {
  * NLI on the whole chunk.
  */
 function pickCitationSentence(chunk: string, claim: string): string | null {
-  const claimTerms = new Set(
-    (claim.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).slice(0, 30),
-  );
-  if (claimTerms.size === 0) return null;
+  const claimTerms = new Set((claim.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).slice(0, 30));
+  if (claimTerms.size === 0) {
+    return null;
+  }
   const sentences = chunk.split(/(?<=[.!?。!?])\s+/);
   let best: { s: string; score: number } | null = null;
   for (const s of sentences) {
     const terms = s.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [];
     let hits = 0;
-    for (const t of terms) if (claimTerms.has(t)) hits++;
+    for (const t of terms) {
+      if (claimTerms.has(t)) {
+        hits++;
+      }
+    }
     const score = hits / Math.max(terms.length, 1);
-    if (!best || score > best.score) best = { s, score };
+    if (!best || score > best.score) {
+      best = { s, score };
+    }
   }
   return best && best.score > 0 ? best.s.trim() : null;
 }
@@ -615,17 +630,17 @@ async function dbCrossRef(
   corroboratingIds: string[];
   contradictingIds: string[];
 }> {
-  const vec = `[${embedding.join(",")}]`;
+  const vec = `[${embedding.join(',')}]`;
   // Cosine distance: 0 = identical, 2 = opposite. Convert to similarity.
   // Exclude the claim's OWN entry — other claims extracted from the
   // same source trivially rephrase each other and create a self-
   // reinforcing echo chamber in the cross-ref score.
-  const neighbors = await db.execute(sql`
+  const neighbors = await getDb().execute(sql`
     SELECT id, verdict, 1 - (embedding <=> ${vec}::vector) AS similarity
     FROM claim
     WHERE id <> ${claimId}
       AND entry_id <> ${entryId}
-      AND verdict IN ('verified', 'disputed')
+      AND verdict IN (${Verdict.Verified}, ${Verdict.Disputed})
       AND 1 - (embedding <=> ${vec}::vector) >= ${SIMILARITY_THRESHOLD}
     ORDER BY embedding <=> ${vec}::vector
     LIMIT 20
@@ -640,18 +655,16 @@ async function dbCrossRef(
     verdict: string;
     similarity: number;
   }>) {
-    if (n.verdict === "verified") {
+    if (n.verdict === Verdict.Verified) {
       corroborations++;
       corroboratingIds.push(n.id);
-    } else if (n.verdict === "disputed") {
+    } else if (n.verdict === Verdict.Disputed) {
       contradictions++;
       contradictingIds.push(n.id);
     }
   }
   return { corroborations, contradictions, corroboratingIds, contradictingIds };
 }
-
-
 
 // Single-flight guard. `setInterval` fires every 60s but a full
 // batch can take 2-3 minutes, so successive ticks would race on the
@@ -672,23 +685,25 @@ let verifyRunning = false;
 // while finetune is unloading models / writing GGUF.
 //
 // Hex layout matches finetune/run.py FT_LOCK_KEY: 0x6B6E6F6C64720001.
-const FT_LOCK_KEY = BigInt("0x6B6E6F6C64720001");
+const FT_LOCK_KEY = BigInt('0x6B6E6F6C64720001');
 
 async function tryAcquireSharedFtLock(): Promise<boolean> {
-  const r = (await db.execute(sql`
+  const r = (await getDb().execute(sql`
     SELECT pg_try_advisory_lock_shared(${sql.raw(FT_LOCK_KEY.toString())}::bigint) AS got
   `)) as unknown as Array<{ got: boolean }>;
   return r[0]?.got === true;
 }
 async function releaseSharedFtLock(): Promise<void> {
-  await db.execute(sql`
+  await getDb().execute(sql`
     SELECT pg_advisory_unlock_shared(${sql.raw(FT_LOCK_KEY.toString())}::bigint)
   `);
 }
 
 /** Process up to `batchSize` claims from the verify queue. */
-export async function processVerifyQueue(batchSize = 5): Promise<number> {
-  if (verifyRunning) return 0;
+async function processVerifyQueue(batchSize = 5): Promise<number> {
+  if (verifyRunning) {
+    return 0;
+  }
   verifyRunning = true;
   // Block-aware: if finetune holds the exclusive lock we skip this tick
   // entirely instead of letting Ollama calls fail one-by-one against an
@@ -696,7 +711,7 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
   const gotLock = await tryAcquireSharedFtLock();
   if (!gotLock) {
     verifyRunning = false;
-    logger.info("verify cycle skipped: finetune cycle in progress");
+    logger.info('verify cycle skipped: finetune cycle in progress');
     return 0;
   }
   try {
@@ -705,7 +720,7 @@ export async function processVerifyQueue(batchSize = 5): Promise<number> {
     try {
       await releaseSharedFtLock();
     } catch (err) {
-      logger.warn({ error: (err as Error).message }, "failed to release ft-shared lock");
+      logger.warn({ error: (err as Error).message }, 'failed to release ft-shared lock');
     }
     verifyRunning = false;
   }
@@ -727,7 +742,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
   // Use NOW() in SQL rather than binding a JS Date — drizzle's sql
   // template passes Date objects directly to postgres-js which
   // rejects them for TIMESTAMPTZ params ("must be string or Buffer").
-  const due = (await db.execute(sql`
+  const due = (await getDb().execute(sql`
     SELECT claim_id, attempts
     FROM verify_queue
     WHERE next_attempt_at <= NOW()
@@ -737,7 +752,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
     LIMIT ${batchSize}
     FOR UPDATE SKIP LOCKED
   `)) as unknown as Array<{ claim_id: string; attempts: number }>;
-  const dueItems = due.map((r) => ({ claimId: r.claim_id, attempts: r.attempts }));
+  const dueItems = due.map(r => ({ claimId: r.claim_id, attempts: r.attempts }));
 
   // Concurrent batch. Each claim's verify is dominated by network
   // waits (URL fetches, LLM HTTP, SearXNG) — `Promise.allSettled`
@@ -746,7 +761,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
   // forward passes still serialize on the JS thread, but those are
   // microseconds compared to the seconds-each network waits.
   const results = await Promise.allSettled(
-    dueItems.map(async (item) => {
+    dueItems.map(async item => {
       let result = await verifyClaim(item.claimId);
       if (!result) {
         if (item.attempts < 2) {
@@ -760,22 +775,18 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
         // distinct source label so metrics separate this from genuine
         // jury verdicts.
         result = {
-          verdict: "unverified",
+          verdict: Verdict.Unverified,
           certainty: 0,
-          evidence: { source: "exhausted-pipeline", rationale: "all verification paths returned null" },
+          evidence: { source: EvidenceSource.ExhaustedPipeline, rationale: 'all verification paths returned null' },
         };
       }
       let oldVerdict: string | null = null;
-      await db.transaction(async (tx) => {
+      await getDb().transaction(async tx => {
         // Capture the pre-update verdict so we can fire the
         // agent_feedback_authority learner only on actual
         // transitions. SELECT inside the tx keeps the snapshot
         // consistent with the UPDATE that follows.
-        const [prior] = await tx
-          .select({ verdict: claim.verdict })
-          .from(claim)
-          .where(eq(claim.id, item.claimId))
-          .limit(1);
+        const [prior] = await tx.select({ verdict: claim.verdict }).from(claim).where(eq(claim.id, item.claimId)).limit(1);
         oldVerdict = prior?.verdict ?? null;
         await tx
           .update(claim)
@@ -797,8 +808,8 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
             ${result!.verdict},
             ${result!.certainty},
             ${result!.evidence.source},
-            ${process.env.KNOLDR_OLLAMA_FAST_MODEL ?? "gemma4:e4b"},
-            'auto',
+            ${process.env.KNOLDR_OLLAMA_FAST_MODEL ?? 'gemma4:e4b'},
+            ${VerdictTrigger.Auto},
             NOW()
           )
         `);
@@ -812,11 +823,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
       // touch the verdict commit above (already done), and the
       // function swallows its own errors.
       if (oldVerdict && oldVerdict !== result!.verdict) {
-        recordVerdictTransitionSafe(
-          item.claimId,
-          oldVerdict as "verified" | "disputed" | "unverified" | "not-applicable",
-          result!.verdict as "verified" | "disputed" | "unverified" | "not-applicable",
-        );
+        recordVerdictTransitionSafe(item.claimId, oldVerdict as Verdict, result!.verdict as Verdict);
       }
       // claim_relation edge writes — outside the verdict tx so a
       // failed edge insert (FK miss, dup) can't roll back the
@@ -824,16 +831,16 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
       // and FK-safe; failures are logged and swallowed inside.
       const ev = result!.evidence;
       if (ev.contradictingClaimIds && ev.contradictingClaimIds.length > 0) {
-        await writeClaimEdges(item.claimId, ev.contradictingClaimIds, "contradicts", {
+        await writeClaimEdges(item.claimId, ev.contradictingClaimIds, RelationType.Contradicts, {
           weight: result!.certainty,
-          createdBy: "auto",
+          createdBy: VerdictTrigger.Auto,
           metadata: { source: ev.source },
         });
       }
       if (ev.corroboratingClaimIds && ev.corroboratingClaimIds.length > 0) {
-        await writeClaimEdges(item.claimId, ev.corroboratingClaimIds, "supports", {
+        await writeClaimEdges(item.claimId, ev.corroboratingClaimIds, RelationType.Supports, {
           weight: result!.certainty,
-          createdBy: "auto",
+          createdBy: VerdictTrigger.Auto,
           metadata: { source: ev.source },
         });
       }
@@ -845,20 +852,17 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
   for (let i = 0; i < results.length; i++) {
     const r = results[i]!;
     const item = dueItems[i]!;
-    if (r.status === "fulfilled" && r.value.committed) {
+    if (r.status === 'fulfilled' && r.value.committed) {
       processed++;
-    } else if (r.status === "rejected") {
-      verifyErrors.inc({ kind: "verify_exception" });
-      logger.warn(
-        { claimId: item.claimId, error: (r.reason as Error).message },
-        "verify failed, rescheduling",
-      );
+    } else if (r.status === 'rejected') {
+      verifyErrors.inc({ kind: 'verify_exception' });
+      logger.warn({ claimId: item.claimId, error: (r.reason as Error).message }, 'verify failed, rescheduling');
       // On a third exception, commit an explicit `unverified` and drop
       // the row from the queue instead of bumping attempts indefinitely.
       // Previously, an always-throwing verify left rows with attempts=
       // 25+ sitting in the queue forever (saw 1020 such rows in prod).
       if (item.attempts >= 2) {
-        await finalizeUnverified(item.claimId, "exception after 3 attempts");
+        await finalizeUnverified(item.claimId, 'exception after 3 attempts');
       } else {
         await bumpAttempt(item.claimId, item.attempts);
       }
@@ -866,7 +870,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
   }
 
   if (processed > 0) {
-    logger.info({ processed, batchSize }, "verify queue batch processed");
+    logger.info({ processed, batchSize }, 'verify queue batch processed');
   }
   return processed;
 }
@@ -876,7 +880,7 @@ async function bumpAttempt(claimId: string, currentAttempts: number): Promise<vo
   // cadence so poison-claim behavior is uniform across queues.
   const next = currentAttempts + 1;
   const backoffMs = 1000 * 60 * Math.pow(5, next);
-  await db
+  await getDb()
     .update(verifyQueue)
     .set({
       attempts: sql`LEAST(3, ${verifyQueue.attempts} + 1)`,
@@ -886,13 +890,13 @@ async function bumpAttempt(claimId: string, currentAttempts: number): Promise<vo
 }
 
 async function finalizeUnverified(claimId: string, reason: string): Promise<void> {
-  await db.transaction(async (tx) => {
+  await getDb().transaction(async tx => {
     await tx
       .update(claim)
       .set({
-        verdict: "unverified",
+        verdict: Verdict.Unverified,
         certainty: 0,
-        evidence: { source: "exception-finalize", rationale: reason },
+        evidence: { source: EvidenceSource.ExceptionFinalize, rationale: reason },
       })
       .where(eq(claim.id, claimId));
     await tx.execute(sql`
@@ -900,66 +904,56 @@ async function finalizeUnverified(claimId: string, reason: string): Promise<void
       VALUES (
         ${ulid()},
         ${claimId},
-        'unverified',
+        ${Verdict.Unverified},
         0,
-        'exception-finalize',
-        ${process.env.KNOLDR_OLLAMA_FAST_MODEL ?? "gemma4:e4b"},
-        'auto',
+        ${EvidenceSource.ExceptionFinalize},
+        ${process.env.KNOLDR_OLLAMA_FAST_MODEL ?? 'gemma4:e4b'},
+        ${VerdictTrigger.Auto},
         NOW()
       )
     `);
     await tx.delete(verifyQueue).where(eq(verifyQueue.claimId, claimId));
   });
-  verifyVerdicts.inc({ source: "exception-finalize", verdict: "unverified" });
+  verifyVerdicts.inc({ source: EvidenceSource.ExceptionFinalize, verdict: Verdict.Unverified });
 }
 
 /** Recompute factuality = verified / total factual for an entry. */
-export async function updateFactualityScore(
-  entryId: string,
-  entryCreatedAt: Date,
-): Promise<void> {
-  const [counts] = await db
+async function updateFactualityScore(entryId: string, entryCreatedAt: Date): Promise<void> {
+  const [counts] = await getDb()
     .select({
       total: sql<number>`COUNT(*)::int`,
-      verified: sql<number>`SUM(CASE WHEN verdict = 'verified' THEN 1 ELSE 0 END)::int`,
+      verified: sql<number>`SUM(CASE WHEN verdict = ${Verdict.Verified} THEN 1 ELSE 0 END)::int`,
     })
     .from(claim)
-    .where(
-      and(
-        eq(claim.entryId, entryId),
-        eq(claim.entryCreatedAt, entryCreatedAt),
-        eq(claim.type, "factual"),
-      ),
-    );
+    .where(and(eq(claim.entryId, entryId), eq(claim.entryCreatedAt, entryCreatedAt), eq(claim.type, ClaimType.Factual)));
 
-  if (!counts || counts.total === 0) return;
+  if (!counts || counts.total === 0) {
+    return;
+  }
   const factuality = counts.verified / counts.total;
 
-  await db
+  await getDb()
     .insert(entryScore)
     .values({
       entryId,
       entryCreatedAt,
-      dimension: "factuality",
+      dimension: EntryScoreDimension.Factuality,
       value: factuality,
-      scoredBy: "system",
+      scoredBy: 'system',
     })
     .onConflictDoUpdate({
       target: [entryScore.entryId, entryScore.entryCreatedAt, entryScore.dimension],
       set: {
         value: factuality,
         scoredAt: new Date(),
-        scoredBy: "system",
+        scoredBy: 'system',
       },
     });
 }
 
 /** Optional helper: boost verify priority for entries with high authority. */
-export async function priorityForEntry(
-  entryId: string,
-  entryCreatedAt: Date,
-): Promise<number> {
-  const [row] = await db
+async function priorityForEntry(entryId: string, entryCreatedAt: Date): Promise<number> {
+  const [row] = await getDb()
     .select({ authority: entry.authority })
     .from(entry)
     .where(and(eq(entry.id, entryId), eq(entry.createdAt, entryCreatedAt)))
@@ -968,3 +962,4 @@ export async function priorityForEntry(
   return row ? Math.round(row.authority * 100) : 0;
 }
 
+export { verifyClaim, processVerifyQueue, updateFactualityScore, priorityForEntry };

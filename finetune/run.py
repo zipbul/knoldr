@@ -468,8 +468,13 @@ def _ollama_create_strict(tag: str, gguf_path: Path) -> bool:
         if not (200 <= status < 300):
             print(f"WARN: ollama create {tag} returned HTTP {status}; body={body[:300]}")
             return False
-        # Walk the NDJSON stream — any embedded error line means the
-        # registration didn't actually succeed even though HTTP was 2xx.
+        # Walk the NDJSON stream. The contract is "True only when a
+        # success indicator was observed AND no error line appeared":
+        #   - any embedded {"error": ...} → False
+        #   - terminal {"status": "success"} → True
+        #   - no parseable JSON at all → False (don't trust a body
+        #     we couldn't read; it could be a proxy-mangled response)
+        saw_success = False
         for line in body.strip().splitlines():
             line = line.strip()
             if not line:
@@ -481,6 +486,14 @@ def _ollama_create_strict(tag: str, gguf_path: Path) -> bool:
             if obj.get("error"):
                 print(f"WARN: ollama create {tag} reported error: {obj['error']}")
                 return False
+            if obj.get("status") == "success":
+                saw_success = True
+        if not saw_success:
+            print(
+                f"WARN: ollama create {tag} returned 2xx but no success "
+                f"indicator in body; treating as failure. body={body[:300]}"
+            )
+            return False
         return True
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         print(f"WARN: ollama create {tag} failed: {e}")

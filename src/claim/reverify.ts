@@ -132,8 +132,8 @@ export async function detectDrift(batchSize = REVERIFY_BATCH): Promise<number> {
       // this drift get credit and those who got it wrong lose it.
       recordVerdictTransitionSafe(
         c.id,
-        c.verdict as "verified" | "disputed" | "unverified" | "not_applicable",
-        fresh.verdict as "verified" | "disputed" | "unverified" | "not_applicable",
+        c.verdict as "verified" | "disputed" | "unverified" | "not-applicable",
+        fresh.verdict as "verified" | "disputed" | "unverified" | "not-applicable",
       );
       logger.info(
         {

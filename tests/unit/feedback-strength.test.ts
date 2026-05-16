@@ -33,7 +33,7 @@ describe("computeFeedbackEvidenceStrength — direct vs inferred weighting", () 
     const score = computeFeedbackEvidenceStrength({
       counterSourceUrl: "https://x",
       counterNliScore: 0.95,
-      failureDimension: "scope_too_broad",
+      failureDimension: "scope-too-broad",
       contextDomain: "security",
       partialTruth: 0.5,
     });

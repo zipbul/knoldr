@@ -139,7 +139,7 @@ async function main(): Promise<void> {
     reporterAgentId: "smoke-agent",
     applicationMethod: "applied",
     outcome: "failed",
-    failureDimension: "fully_false",
+    failureDimension: "fully-false",
     counterSourceUrl: "https://example.com/x",
     counterNliScore: 0.9,
   });

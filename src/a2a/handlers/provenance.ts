@@ -64,7 +64,7 @@ export async function handleProvenance(
       UNION ALL
       SELECT cr.target_claim_id, w.depth + 1
       FROM walk w
-      JOIN claim_relation cr ON cr.source_claim_id = w.cid AND cr.relation_type = 'derives_from'
+      JOIN claim_relation cr ON cr.source_claim_id = w.cid AND cr.relation_type = 'derives-from'
       WHERE w.depth < ${validated.maxDepth}
     )
     SELECT

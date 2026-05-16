@@ -1,28 +1,30 @@
-// Shared enum constants for claim_feedback. Lives in its own module
-// to break the import cycle:
-//   src/a2a/handlers/claim-feedback.ts → src/fqa/queue.ts →
-//   src/fqa/enrich.ts → src/fqa/enrichment-llm.ts →
-//   (used to import FAILURE_DIMENSIONS from claim-feedback) → cycle.
-// All four enums match the CHECK constraints on the claim_feedback
-// table — keep them in lockstep when schema changes.
+// Back-compat shim. The single source of truth lives in
+// src/score/enums.ts now (PascalCase members + kebab-case values).
+// These arrays are derived from the enum at module load so the
+// existing zod-style `z.enum([...])` callers keep working.
 
-export const APPLICATION_METHODS = [
-  "verified",
-  "applied",
-  "cited",
-  "reasoned_over",
-] as const;
-export type ApplicationMethod = (typeof APPLICATION_METHODS)[number];
+import {
+  ApplicationMethod,
+  FailureDimension,
+  Outcome,
+  enumValues,
+} from "./enums";
 
-export const OUTCOMES = ["held", "failed", "partial"] as const;
-export type Outcome = (typeof OUTCOMES)[number];
+export const APPLICATION_METHODS = enumValues(ApplicationMethod) as readonly [
+  ApplicationMethod,
+  ...ApplicationMethod[],
+];
+export const OUTCOMES = enumValues(Outcome) as readonly [
+  Outcome,
+  ...Outcome[],
+];
+export const FAILURE_DIMENSIONS = enumValues(FailureDimension) as readonly [
+  FailureDimension,
+  ...FailureDimension[],
+];
 
-export const FAILURE_DIMENSIONS = [
-  "fully_false",
-  "scope_too_broad",
-  "time_expired",
-  "modality_too_strong",
-  "context_mismatch",
-  "partially_correct",
-] as const;
-export type FailureDimension = (typeof FAILURE_DIMENSIONS)[number];
+export type {
+  ApplicationMethod,
+  FailureDimension,
+  Outcome,
+};

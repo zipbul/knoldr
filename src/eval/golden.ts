@@ -27,13 +27,13 @@ import { verifyClaim } from "../claim/verify";
 import { authorityFor } from "../claim/authority";
 import { logger } from "../observability/logger";
 
-type Verdict = "verified" | "disputed" | "unverified" | "not_applicable";
+type Verdict = "verified" | "disputed" | "unverified" | "not-applicable";
 
 const VERDICTS: readonly Verdict[] = [
   "verified",
   "disputed",
   "unverified",
-  "not_applicable",
+  "not-applicable",
 ] as const;
 
 interface PerVerdictMetric {
@@ -96,7 +96,7 @@ async function evaluateOne(item: {
     const embedding = await generateEmbedding(item.statement);
     const claimId = ulid();
     const initialVerdict: Verdict =
-      item.claimType === "factual" ? "unverified" : "not_applicable";
+      item.claimType === "factual" ? "unverified" : "not-applicable";
 
     await db.transaction(async (tx) => {
       await tx.insert(entry).values({
@@ -156,7 +156,7 @@ async function evaluateOne(item: {
       // Production never verifies non-factual claims — they ship as
       // not_applicable. Mirror that here so the metric reflects real
       // pipeline behavior, not a hypothetical verifier.
-      predicted = "not_applicable";
+      predicted = "not-applicable";
     }
 
     return {
@@ -294,10 +294,10 @@ async function runGoldenEvalInner(
   }
 
   const byVerdict: Record<Verdict, PerVerdictMetric> = {
-    verified: emptyMetric(),
-    disputed: emptyMetric(),
-    unverified: emptyMetric(),
-    not_applicable: emptyMetric(),
+    "verified": emptyMetric(),
+    "disputed": emptyMetric(),
+    "unverified": emptyMetric(),
+    "not-applicable": emptyMetric(),
   };
   const byType: Record<string, PerVerdictMetric> = {};
 

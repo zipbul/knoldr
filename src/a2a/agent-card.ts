@@ -96,12 +96,12 @@ Output:
 Input: {
   claimId: string,                  // claim.id (ULID) returned from find
   reporterAgentId: string,          // stable agent identifier
-  applicationMethod: "verified"|"applied"|"cited"|"reasoned_over",
+  applicationMethod: "verified"|"applied"|"cited"|"reasoned-over",
   outcome: "held"|"failed"|"partial",
 
   // Failure detail (required when outcome is failed/partial, prohibited when held)
-  failureDimension?: "fully_false"|"scope_too_broad"|"time_expired"
-                    |"modality_too_strong"|"context_mismatch"|"partially_correct",
+  failureDimension?: "fully-false"|"scope-too-broad"|"time-expired"
+                    |"modality-too-strong"|"context-mismatch"|"partially-correct",
   partialTruth?: number,            // 0-1 estimate of how much is true
 
   // Context the claim was applied in
@@ -131,7 +131,7 @@ reporterAgentId on update must match the row's original reporter.
 Notes:
 - enrichmentStatus = 'not_needed' (held or already strong), 'pending'
   (awaiting background LLM enrichment of audit_note), or
-  'awaiting_pull' (background worker decided the claim is worth more
+  'awaiting-pull' (background worker decided the claim is worth more
   detail — call this skill again with the same feedbackId once you
   have more info).
 - A background worker LLM-infers missing structured fields from the
@@ -140,7 +140,7 @@ Notes:
 - evidenceStrength × reporterFeedbackAuthority is the effective weight
   this feedback carries when claim authority is later reconsidered.`,
       examples: [
-        '{ "skill": "claim_feedback", "input": { "claimId": "01HX...", "reporterAgentId": "agent-42", "applicationMethod": "applied", "outcome": "failed", "failureDimension": "scope_too_broad", "partialTruth": 0.3, "counterSourceUrl": "https://example.com/bench", "counterNliScore": 0.82 } }',
+        '{ "skill": "claim_feedback", "input": { "claimId": "01HX...", "reporterAgentId": "agent-42", "applicationMethod": "applied", "outcome": "failed", "failureDimension": "scope-too-broad", "partialTruth": 0.3, "counterSourceUrl": "https://example.com/bench", "counterNliScore": 0.82 } }',
         '{ "skill": "claim_feedback", "input": { "claimId": "01HX...", "reporterAgentId": "agent-42", "applicationMethod": "verified", "outcome": "held" } }',
       ],
     },

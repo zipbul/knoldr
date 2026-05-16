@@ -42,7 +42,7 @@ export async function runSmokeEval(): Promise<{
     FROM claim
     WHERE verdict IN ('verified', 'disputed')
       AND certainty >= 0.8
-      AND evidence->>'source' = 'source_check'
+      AND evidence->>'source' = 'source-check'
       AND created_at > NOW() - INTERVAL '30 days'
       AND abs(hashtext(id || to_char(now(), 'YYYY-MM-DD HH24'))) % 20 = 0
     LIMIT ${SAMPLE_SIZE}

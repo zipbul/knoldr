@@ -16,7 +16,7 @@ import { logger } from "../observability/logger";
 const FEEDBACK_LOOKBACK_DAYS = 30;
 const EMA_ALPHA = 0.1; // slow learning — one event can't whiplash authority
 
-type Verdict = "verified" | "disputed" | "unverified" | "not_applicable";
+type Verdict = "verified" | "disputed" | "unverified" | "not-applicable";
 
 /**
  * Classify the verdict transition into one of three outcomes:
@@ -32,7 +32,7 @@ function classify(
 ): "moved_away_from_verified" | "moved_to_verified" | "no_signal" {
   if (oldVerdict === newVerdict) return "no_signal";
   // not_applicable rows are non-factual and excluded from feedback learning.
-  if (oldVerdict === "not_applicable" || newVerdict === "not_applicable") {
+  if (oldVerdict === "not-applicable" || newVerdict === "not-applicable") {
     return "no_signal";
   }
   if (oldVerdict === "verified" && newVerdict !== "verified") {

@@ -51,7 +51,7 @@ async function collectSamples(): Promise<CalibrationSample[]> {
       (evidence->'sourceChecks'->0->'scores'->>'entailment')::float AS entailment,
       (evidence->'sourceChecks'->0->'scores'->>'contradiction')::float AS contradiction
     FROM claim
-    WHERE evidence->>'source' = 'source_check'
+    WHERE evidence->>'source' = 'source-check'
       AND verdict IN ('verified','disputed')
       AND evidence->'sourceChecks'->0->'scores' IS NOT NULL
     ORDER BY created_at DESC

@@ -25,7 +25,7 @@ describe("recomputeEvidenceStrength — direct vs inferred weighting", () => {
     const score = recomputeEvidenceStrength({
       counterSourceUrl: "https://x",
       counterNliScore: 0.9,
-      failureDimension: "scope_too_broad",
+      failureDimension: "scope-too-broad",
       contextDomain: "security",
       partialTruth: 0.3,
     });

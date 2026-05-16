@@ -78,7 +78,7 @@ export async function runEnrichment(
       feedbackId: row.id,
       enriched: false,
       fieldsInferred: [],
-      finalEnrichmentStatus: "not_needed",
+      finalEnrichmentStatus: "not-needed",
       newEvidenceStrength: 0,
     };
   }
@@ -148,14 +148,14 @@ export async function runEnrichment(
   // happens when the reporter calls back, not from here.
   let finalStatus: string;
   if (newStrength >= STRONG_ENOUGH) {
-    finalStatus = "finalized_inferred";
+    finalStatus = "finalized-inferred";
   } else if (
     claimAuthority >= PULL_AUTHORITY_FLOOR &&
     (row.outcome === "failed" || row.outcome === "partial")
   ) {
-    finalStatus = "awaiting_pull";
+    finalStatus = "awaiting-pull";
   } else {
-    finalStatus = "finalized_inferred";
+    finalStatus = "finalized-inferred";
   }
 
   await db
@@ -212,9 +212,9 @@ export async function expireStalePullTasks(ttlHours = 24): Promise<number> {
   const cutoff = new Date(Date.now() - ttlHours * 3600 * 1000);
   const result = await db
     .update(claimFeedback)
-    .set({ enrichmentStatus: "expired_reporter_unavailable" })
+    .set({ enrichmentStatus: "expired-reporter-unavailable" })
     .where(
-      sql`${claimFeedback.enrichmentStatus} = 'awaiting_pull'
+      sql`${claimFeedback.enrichmentStatus} = 'awaiting-pull'
           AND ${claimFeedback.createdAt} < ${cutoff}`,
     )
     .returning({ id: claimFeedback.id });
@@ -258,7 +258,7 @@ export async function auditAndEnrich(opts: {
       sql`${claimFeedback.createdAt} >= ${cutoff}
         AND ${claimFeedback.evidenceStrength} < 0.8
         AND ${claimFeedback.outcome} IN ('failed','partial')
-        AND ${claimFeedback.enrichmentStatus} IN ('pending','awaiting_pull')`,
+        AND ${claimFeedback.enrichmentStatus} IN ('pending','awaiting-pull')`,
     )
     .orderBy(sql`${claimFeedback.evidenceStrength} ASC`)
     .limit(opts.maxItems);

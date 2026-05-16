@@ -29,12 +29,12 @@ const SYSTEM_PROMPT = `You are reviewing an agent's free-text note about why a s
 Fields:
 
 1. failure_dimension — exactly one of:
-   - "fully_false": the claim is wrong in every context
-   - "scope_too_broad": claim says "all/every X" but reality is "some X"
-   - "time_expired": claim was true historically but no longer is
-   - "modality_too_strong": claim asserts definitely; reality is hedged
-   - "context_mismatch": claim is true in some domain/context but not the one applied
-   - "partially_correct": some part holds, other part doesn't, doesn't fit cleanly
+   - "fully-false": the claim is wrong in every context
+   - "scope-too-broad": claim says "all/every X" but reality is "some X"
+   - "time-expired": claim was true historically but no longer is
+   - "modality-too-strong": claim asserts definitely; reality is hedged
+   - "context-mismatch": claim is true in some domain/context but not the one applied
+   - "partially-correct": some part holds, other part doesn't, doesn't fit cleanly
 
 2. partial_truth — number in [0,1] estimating how much of the claim is still true. Use sparingly; null if the note does not justify a numeric estimate.
 

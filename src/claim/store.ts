@@ -29,7 +29,7 @@ export async function storeClaims(
   for (const c of extracted) {
     const id = ulid();
     const embedding = await generateEmbedding(c.statement);
-    const verdict = c.type === "factual" ? "unverified" : "not_applicable";
+    const verdict = c.type === "factual" ? "unverified" : "not-applicable";
 
     await db.transaction(async (tx) => {
       await tx.insert(claim).values({

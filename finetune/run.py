@@ -66,7 +66,7 @@ SQL = {
         SELECT statement, verdict, evidence
         FROM claim
         WHERE verdict IN ('verified', 'disputed')
-          AND evidence->>'source' IN ('source_check', 'cove', 'kg_contradiction')
+          AND evidence->>'source' IN ('source-check', 'cove', 'kg-contradiction')
           AND created_at > now() - interval '90 days'
           AND statement NOT IN (
             SELECT statement FROM golden_set_claim WHERE active = 1
@@ -107,7 +107,7 @@ SQL = {
                evidence->'sourceChecks'->0->>'citation' AS citation,
                verdict
         FROM claim
-        WHERE evidence->>'source' = 'source_check'
+        WHERE evidence->>'source' = 'source-check'
           AND evidence->'sourceChecks'->0->>'citation' IS NOT NULL
           AND verdict IN ('verified', 'disputed')
           AND created_at > now() - interval '90 days'
@@ -202,12 +202,12 @@ def _format_citation(row) -> str | None:
 # Kept here as a literal so the Python container doesn't need to import
 # anything from the TypeScript side.
 FAILURE_DIMENSIONS = (
-    "fully_false",
-    "scope_too_broad",
-    "time_expired",
-    "modality_too_strong",
-    "context_mismatch",
-    "partially_correct",
+    "fully-false",
+    "scope-too-broad",
+    "time-expired",
+    "modality-too-strong",
+    "context-mismatch",
+    "partially-correct",
 )
 
 

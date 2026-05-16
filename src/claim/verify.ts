@@ -29,7 +29,7 @@ import { bespokeCheck } from "../llm/bespoke-check";
 import { verifyVerdicts, verifyErrors, verifyStageLatency } from "../observability/metrics";
 import { logger } from "../observability/logger";
 
-const VERDICTS = ["verified", "disputed", "unverified"] as const;
+const VERDICTS = ["verified", "disputed", "unverified", "not-applicable"] as const;
 type Verdict = (typeof VERDICTS)[number];
 
 interface SourceCheckResult {
@@ -46,7 +46,7 @@ interface SubClaimResult {
   statement: string;
   verdict: Verdict;
   certainty: number;
-  via: "kg_contradiction" | "source_check" | "unverified";
+  via: "kg-contradiction" | "source-check" | "unverified";
   scores?: NliScores;
 }
 
@@ -54,7 +54,7 @@ export interface VerifyResult {
   verdict: Verdict;
   certainty: number;
   evidence: {
-    source: "db_cross_ref" | "kg_contradiction" | "source_check" | "cove" | "exhausted_pipeline" | "exception_finalize";
+    source: "db-cross-ref" | "kg-contradiction" | "source-check" | "cove" | "exhausted-pipeline" | "exception-finalize";
     corroborations?: number;
     contradictions?: number;
     rationale?: string;
@@ -114,7 +114,7 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
 
   if (!row) return null;
 
-  const crossRefTimer = verifyStageLatency.startTimer({ stage: "db_cross_ref" });
+  const crossRefTimer = verifyStageLatency.startTimer({ stage: "db-cross-ref" });
   const crossRef = await dbCrossRef(claimId, row.entryId, row.embedding);
   crossRefTimer();
 
@@ -153,7 +153,7 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
       verdict: "verified",
       certainty: 0.6,
       evidence: {
-        source: "db_cross_ref",
+        source: "db-cross-ref",
         corroborations: crossRef.corroborations,
         contradictions: crossRef.contradictions,
         // Cap to 5 SUPPORTS edges per claim so high-corroboration
@@ -170,7 +170,7 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
   // NLI model misses (e.g. "Bun runs on V8" against KG saying
   // "Bun runs_on JSCore"). Free signal — costs one LLM extraction
   // call but skips both source fetch and jury when it fires.
-  const kgTimer = verifyStageLatency.startTimer({ stage: "kg_contradiction" });
+  const kgTimer = verifyStageLatency.startTimer({ stage: "kg-contradiction" });
   const kgConflict = await checkKgContradiction(row.statement);
   kgTimer();
   if (kgConflict && kgConflict.confidence >= 0.7) {
@@ -186,7 +186,7 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
       verdict: "disputed",
       certainty: kgConflict.confidence,
       evidence: {
-        source: "kg_contradiction",
+        source: "kg-contradiction",
         kgConflict,
         contradictingClaimIds,
       },
@@ -210,7 +210,7 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
   // calibrated entailment probability against the actual cited source,
   // not the LLM's prior knowledge.
   if (sourceUrls.length > 0) {
-    const sourceTimer = verifyStageLatency.startTimer({ stage: "source_check" });
+    const sourceTimer = verifyStageLatency.startTimer({ stage: "source-check" });
     const sourceCheck = await runSourceCheck(row.statement, sourceUrls);
     sourceTimer();
     if (sourceCheck) {
@@ -227,7 +227,7 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
             certainty: counter.contradiction,
             evidence: {
               ...sourceCheck.evidence,
-              source: "source_check",
+              source: "source-check",
               rationale: `counter-search refuted at ${counter.url} (contradiction=${counter.contradiction.toFixed(2)})`,
             },
           });
@@ -301,7 +301,7 @@ async function runCoveVerification(
         statement: sc,
         verdict: "disputed",
         certainty: kg.confidence,
-        via: "kg_contradiction",
+        via: "kg-contradiction",
       });
       continue;
     }
@@ -311,7 +311,7 @@ async function runCoveVerification(
         statement: sc,
         verdict: sc_check.verdict,
         certainty: sc_check.certainty,
-        via: "source_check",
+        via: "source-check",
         scores: sc_check.evidence.sourceChecks?.[0]?.scores,
       });
     } else {
@@ -524,7 +524,7 @@ async function runSourceCheck(
   return {
     verdict: agg.verdict,
     certainty: damped,
-    evidence: { source: "source_check", sourceChecks: checks, sourceUrls: urls },
+    evidence: { source: "source-check", sourceChecks: checks, sourceUrls: urls },
   };
 }
 
@@ -762,7 +762,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
         result = {
           verdict: "unverified",
           certainty: 0,
-          evidence: { source: "exhausted_pipeline", rationale: "all verification paths returned null" },
+          evidence: { source: "exhausted-pipeline", rationale: "all verification paths returned null" },
         };
       }
       let oldVerdict: string | null = null;
@@ -814,8 +814,8 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
       if (oldVerdict && oldVerdict !== result!.verdict) {
         recordVerdictTransitionSafe(
           item.claimId,
-          oldVerdict as "verified" | "disputed" | "unverified" | "not_applicable",
-          result!.verdict as "verified" | "disputed" | "unverified" | "not_applicable",
+          oldVerdict as "verified" | "disputed" | "unverified" | "not-applicable",
+          result!.verdict as "verified" | "disputed" | "unverified" | "not-applicable",
         );
       }
       // claim_relation edge writes — outside the verdict tx so a
@@ -892,7 +892,7 @@ async function finalizeUnverified(claimId: string, reason: string): Promise<void
       .set({
         verdict: "unverified",
         certainty: 0,
-        evidence: { source: "exception_finalize", rationale: reason },
+        evidence: { source: "exception-finalize", rationale: reason },
       })
       .where(eq(claim.id, claimId));
     await tx.execute(sql`
@@ -902,7 +902,7 @@ async function finalizeUnverified(claimId: string, reason: string): Promise<void
         ${claimId},
         'unverified',
         0,
-        'exception_finalize',
+        'exception-finalize',
         ${process.env.KNOLDR_OLLAMA_FAST_MODEL ?? "gemma4:e4b"},
         'auto',
         NOW()
@@ -910,7 +910,7 @@ async function finalizeUnverified(claimId: string, reason: string): Promise<void
     `);
     await tx.delete(verifyQueue).where(eq(verifyQueue.claimId, claimId));
   });
-  verifyVerdicts.inc({ source: "exception_finalize", verdict: "unverified" });
+  verifyVerdicts.inc({ source: "exception-finalize", verdict: "unverified" });
 }
 
 /** Recompute factuality = verified / total factual for an entry. */

@@ -113,9 +113,9 @@ export function computeEvidenceStrength(input: ClaimFeedbackInput): number {
  */
 function initialEnrichmentStatus(input: ClaimFeedbackInput, strength: number): string {
   // Held outcomes carry no enrichment value — no failure to investigate.
-  if (input.outcome === "held") return "not_needed";
+  if (input.outcome === "held") return "not-needed";
   // Already strong enough that FQA wouldn't ask for more.
-  if (strength >= 0.8) return "not_needed";
+  if (strength >= 0.8) return "not-needed";
   return "pending";
 }
 
@@ -364,7 +364,7 @@ async function updateExistingFeedback(
   // Uses the stored outcome, not the input — see effectiveOutcome.
   const newStatus =
     effectiveOutcome === "held"
-      ? "not_needed"
+      ? "not-needed"
       : newStrength >= 0.8
         ? "enriched"
         : "pending";

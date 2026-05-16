@@ -19,8 +19,8 @@ import { logger } from "../observability/logger";
 export type ClaimRelationType =
   | "supports"
   | "contradicts"
-  | "derives_from"
-  | "superseded_by"
+  | "derives-from"
+  | "superseded-by"
   | "refines";
 
 export interface WriteEdgesOptions {

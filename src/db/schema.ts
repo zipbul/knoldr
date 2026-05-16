@@ -262,7 +262,7 @@ export const claim = pgTable(
     ),
     check(
       "claim_verdict_values",
-      sql`${t.verdict} IN ('verified', 'disputed', 'unverified', 'not_applicable')`,
+      sql`${t.verdict} IN ('verified', 'disputed', 'unverified', 'not-applicable')`,
     ),
     check("claim_certainty_range", sql`${t.certainty} >= 0 AND ${t.certainty} <= 1`),
     check("claim_authority_range", sql`${t.authority} >= 0 AND ${t.authority} <= 1`),
@@ -320,7 +320,7 @@ export const verdictLog = pgTable(
     }).onDelete("cascade"),
     check(
       "verdict_log_verdict_values",
-      sql`${t.verdict} IN ('verified', 'disputed', 'unverified', 'not_applicable')`,
+      sql`${t.verdict} IN ('verified', 'disputed', 'unverified', 'not-applicable')`,
     ),
     check("verdict_log_certainty_range", sql`${t.certainty} >= 0 AND ${t.certainty} <= 1`),
     check(
@@ -459,7 +459,7 @@ export const claimRelation = pgTable(
     }).onDelete("cascade"),
     check(
       "claim_relation_type_values",
-      sql`${t.relationType} IN ('supports','contradicts','derives_from','superseded_by','refines')`,
+      sql`${t.relationType} IN ('supports','contradicts','derives-from','superseded-by','refines')`,
     ),
     check("claim_relation_weight_range", sql`${t.weight} >= 0 AND ${t.weight} <= 1`),
     check(
@@ -556,7 +556,7 @@ export const goldenSetClaim = pgTable(
     ),
     check(
       "golden_set_expected_verdict_values",
-      sql`${t.expectedVerdict} IN ('verified', 'disputed', 'unverified', 'not_applicable')`,
+      sql`${t.expectedVerdict} IN ('verified', 'disputed', 'unverified', 'not-applicable')`,
     ),
     check("golden_set_active_values", sql`${t.active} IN (0, 1)`),
     index("idx_golden_set_domain").on(t.domain),
@@ -665,7 +665,7 @@ export const claimFeedback = pgTable(
     }).onDelete("cascade"),
     check(
       "claim_feedback_application_method_values",
-      sql`${t.applicationMethod} IN ('verified','applied','cited','reasoned_over')`,
+      sql`${t.applicationMethod} IN ('verified','applied','cited','reasoned-over')`,
     ),
     check(
       "claim_feedback_outcome_values",
@@ -673,11 +673,11 @@ export const claimFeedback = pgTable(
     ),
     check(
       "claim_feedback_failure_dimension_values",
-      sql`${t.failureDimension} IS NULL OR ${t.failureDimension} IN ('fully_false','scope_too_broad','time_expired','modality_too_strong','context_mismatch','partially_correct')`,
+      sql`${t.failureDimension} IS NULL OR ${t.failureDimension} IN ('fully-false','scope-too-broad','time-expired','modality-too-strong','context-mismatch','partially-correct')`,
     ),
     check(
       "claim_feedback_failure_dimension_inferred_values",
-      sql`${t.failureDimensionInferred} IS NULL OR ${t.failureDimensionInferred} IN ('fully_false','scope_too_broad','time_expired','modality_too_strong','context_mismatch','partially_correct')`,
+      sql`${t.failureDimensionInferred} IS NULL OR ${t.failureDimensionInferred} IN ('fully-false','scope-too-broad','time-expired','modality-too-strong','context-mismatch','partially-correct')`,
     ),
     check(
       "claim_feedback_partial_truth_range",
@@ -697,7 +697,7 @@ export const claimFeedback = pgTable(
     ),
     check(
       "claim_feedback_enrichment_status_values",
-      sql`${t.enrichmentStatus} IN ('pending','finalized_inferred','awaiting_pull','enriched','expired_reporter_unavailable','skipped_backpressure','not_needed')`,
+      sql`${t.enrichmentStatus} IN ('pending','finalized-inferred','awaiting-pull','enriched','expired-reporter-unavailable','skipped-backpressure','not-needed')`,
     ),
     check(
       "claim_feedback_reporter_responded_values",

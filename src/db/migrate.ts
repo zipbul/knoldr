@@ -164,7 +164,7 @@ async function migrate() {
       statement TEXT NOT NULL CHECK (length(statement) <= 2000),
       type TEXT NOT NULL CHECK (type IN ('factual', 'subjective', 'predictive', 'normative')),
       verdict TEXT NOT NULL DEFAULT 'unverified'
-        CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not_applicable')),
+        CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not-applicable')),
       certainty DOUBLE PRECISION NOT NULL DEFAULT 0.0 CHECK (certainty >= 0 AND certainty <= 1),
       evidence JSONB,
       embedding vector(384) NOT NULL,
@@ -188,7 +188,7 @@ async function migrate() {
     CREATE TABLE IF NOT EXISTS verdict_log (
       id TEXT PRIMARY KEY,
       claim_id TEXT NOT NULL REFERENCES claim(id) ON DELETE CASCADE,
-      verdict TEXT NOT NULL CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not_applicable')),
+      verdict TEXT NOT NULL CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not-applicable')),
       certainty DOUBLE PRECISION NOT NULL CHECK (certainty >= 0 AND certainty <= 1),
       evidence_source TEXT,
       grounder_model TEXT,
@@ -318,7 +318,7 @@ async function migrate() {
       source_claim_id TEXT NOT NULL REFERENCES claim(id) ON DELETE CASCADE,
       target_claim_id TEXT NOT NULL REFERENCES claim(id) ON DELETE CASCADE,
       relation_type TEXT NOT NULL
-        CHECK (relation_type IN ('supports','contradicts','derives_from','superseded_by','refines')),
+        CHECK (relation_type IN ('supports','contradicts','derives-from','superseded-by','refines')),
       weight DOUBLE PRECISION NOT NULL DEFAULT 1.0 CHECK (weight >= 0 AND weight <= 1),
       created_by TEXT NOT NULL,
       metadata JSONB,
@@ -420,7 +420,7 @@ async function migrate() {
       claim_type TEXT NOT NULL
         CHECK (claim_type IN ('factual', 'subjective', 'predictive', 'normative')),
       expected_verdict TEXT NOT NULL
-        CHECK (expected_verdict IN ('verified', 'disputed', 'unverified', 'not_applicable')),
+        CHECK (expected_verdict IN ('verified', 'disputed', 'unverified', 'not-applicable')),
       domain TEXT,
       source_hint TEXT,
       labeled_by TEXT NOT NULL,
@@ -470,13 +470,13 @@ async function migrate() {
       observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
       application_method TEXT NOT NULL
-        CHECK (application_method IN ('verified','applied','cited','reasoned_over')),
+        CHECK (application_method IN ('verified','applied','cited','reasoned-over')),
       outcome TEXT NOT NULL
         CHECK (outcome IN ('held','failed','partial')),
 
       failure_dimension TEXT
         CHECK (failure_dimension IS NULL OR failure_dimension IN
-          ('fully_false','scope_too_broad','time_expired','modality_too_strong','context_mismatch','partially_correct')),
+          ('fully-false','scope-too-broad','time-expired','modality-too-strong','context-mismatch','partially-correct')),
       partial_truth DOUBLE PRECISION
         CHECK (partial_truth IS NULL OR (partial_truth >= 0 AND partial_truth <= 1)),
       context_domain TEXT,
@@ -493,7 +493,7 @@ async function migrate() {
 
       failure_dimension_inferred TEXT
         CHECK (failure_dimension_inferred IS NULL OR failure_dimension_inferred IN
-          ('fully_false','scope_too_broad','time_expired','modality_too_strong','context_mismatch','partially_correct')),
+          ('fully-false','scope-too-broad','time-expired','modality-too-strong','context-mismatch','partially-correct')),
       partial_truth_inferred DOUBLE PRECISION
         CHECK (partial_truth_inferred IS NULL OR (partial_truth_inferred >= 0 AND partial_truth_inferred <= 1)),
       counter_source_url_inferred TEXT,
@@ -504,8 +504,8 @@ async function migrate() {
         CHECK (reporter_responded IS NULL OR reporter_responded IN (0, 1)),
       enrichment_status TEXT NOT NULL DEFAULT 'pending'
         CHECK (enrichment_status IN
-          ('pending','finalized_inferred','awaiting_pull',
-           'enriched','expired_reporter_unavailable','skipped_backpressure','not_needed')),
+          ('pending','finalized-inferred','awaiting-pull',
+           'enriched','expired-reporter-unavailable','skipped-backpressure','not-needed')),
 
       evidence_strength DOUBLE PRECISION NOT NULL DEFAULT 0.0
         CHECK (evidence_strength >= 0 AND evidence_strength <= 1),
@@ -539,8 +539,8 @@ async function migrate() {
     END IF;
     ALTER TABLE claim_feedback ADD CONSTRAINT claim_feedback_enrichment_status_values
       CHECK (enrichment_status IN (
-        'pending','finalized_inferred','awaiting_pull','enriched',
-        'expired_reporter_unavailable','skipped_backpressure','not_needed'
+        'pending','finalized-inferred','awaiting-pull','enriched',
+        'expired-reporter-unavailable','skipped-backpressure','not-needed'
       ));
   END $$`;
 
@@ -563,6 +563,152 @@ async function migrate() {
     )
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_agent_feedback_authority ON agent_feedback_authority(feedback_authority DESC)`;
+
+  // ============================================================
+  // snake_case → kebab-case data migration.
+  //
+  // All CHECK constraints above were rewritten to require kebab-
+  // case enum values (single source of truth: src/score/enums.ts).
+  // Any rows still carrying the legacy snake_case form must be
+  // rewritten in place or the new CHECK will reject them on the
+  // next write. We do the migration with CHECK constraints already
+  // updated to the kebab whitelist: the new whitelist contains
+  // both old (where unchanged) and new values that come in via
+  // UPDATE, so this is order-safe. The old constraints can be
+  // dropped after the data migrate runs cleanly.
+  //
+  // For deployments that already have the kebab values (fresh
+  // install), every UPDATE matches 0 rows and the work is free.
+  // ============================================================
+
+  // claim.verdict
+  await sql`UPDATE claim SET verdict = 'not-applicable' WHERE verdict = 'not_applicable'`;
+
+  // verdict_log.verdict
+  await sql`UPDATE verdict_log SET verdict = 'not-applicable' WHERE verdict = 'not_applicable'`;
+
+  // golden_set_claim.expected_verdict
+  await sql`UPDATE golden_set_claim SET expected_verdict = 'not-applicable' WHERE expected_verdict = 'not_applicable'`;
+
+  // claim_relation.relation_type
+  await sql`UPDATE claim_relation SET relation_type = 'derives-from' WHERE relation_type = 'derives_from'`;
+  await sql`UPDATE claim_relation SET relation_type = 'superseded-by' WHERE relation_type = 'superseded_by'`;
+
+  // claim_feedback.application_method
+  await sql`UPDATE claim_feedback SET application_method = 'reasoned-over' WHERE application_method = 'reasoned_over'`;
+
+  // claim_feedback.failure_dimension (direct + inferred)
+  await sql`UPDATE claim_feedback SET failure_dimension = 'fully-false' WHERE failure_dimension = 'fully_false'`;
+  await sql`UPDATE claim_feedback SET failure_dimension = 'scope-too-broad' WHERE failure_dimension = 'scope_too_broad'`;
+  await sql`UPDATE claim_feedback SET failure_dimension = 'time-expired' WHERE failure_dimension = 'time_expired'`;
+  await sql`UPDATE claim_feedback SET failure_dimension = 'modality-too-strong' WHERE failure_dimension = 'modality_too_strong'`;
+  await sql`UPDATE claim_feedback SET failure_dimension = 'context-mismatch' WHERE failure_dimension = 'context_mismatch'`;
+  await sql`UPDATE claim_feedback SET failure_dimension = 'partially-correct' WHERE failure_dimension = 'partially_correct'`;
+  await sql`UPDATE claim_feedback SET failure_dimension_inferred = 'fully-false' WHERE failure_dimension_inferred = 'fully_false'`;
+  await sql`UPDATE claim_feedback SET failure_dimension_inferred = 'scope-too-broad' WHERE failure_dimension_inferred = 'scope_too_broad'`;
+  await sql`UPDATE claim_feedback SET failure_dimension_inferred = 'time-expired' WHERE failure_dimension_inferred = 'time_expired'`;
+  await sql`UPDATE claim_feedback SET failure_dimension_inferred = 'modality-too-strong' WHERE failure_dimension_inferred = 'modality_too_strong'`;
+  await sql`UPDATE claim_feedback SET failure_dimension_inferred = 'context-mismatch' WHERE failure_dimension_inferred = 'context_mismatch'`;
+  await sql`UPDATE claim_feedback SET failure_dimension_inferred = 'partially-correct' WHERE failure_dimension_inferred = 'partially_correct'`;
+
+  // claim_feedback.enrichment_status
+  await sql`UPDATE claim_feedback SET enrichment_status = 'finalized-inferred' WHERE enrichment_status = 'finalized_inferred'`;
+  await sql`UPDATE claim_feedback SET enrichment_status = 'awaiting-pull' WHERE enrichment_status = 'awaiting_pull'`;
+  await sql`UPDATE claim_feedback SET enrichment_status = 'expired-reporter-unavailable' WHERE enrichment_status = 'expired_reporter_unavailable'`;
+  await sql`UPDATE claim_feedback SET enrichment_status = 'skipped-backpressure' WHERE enrichment_status = 'skipped_backpressure'`;
+  await sql`UPDATE claim_feedback SET enrichment_status = 'not-needed' WHERE enrichment_status = 'not_needed'`;
+  // 'awaiting_reporter_push' was retired entirely (push channel removed)
+  await sql`UPDATE claim_feedback SET enrichment_status = 'awaiting-pull' WHERE enrichment_status = 'awaiting_reporter_push'`;
+
+  // After data migration, re-assert the CHECK constraints with the
+  // kebab whitelist. The CREATE TABLE / ADD COLUMN paths above
+  // already use kebab; this block covers older deployments whose
+  // constraint pre-dates the kebab change.
+  await sql`DO $$
+  DECLARE
+    _r RECORD;
+  BEGIN
+    -- Drop Postgres auto-named "_check" siblings whose body still
+    -- carries snake_case values. These were created by inline
+    -- CHECK clauses inside CREATE TABLE on older deployments; the
+    -- named *_values constraints below replace them with kebab.
+    FOR _r IN
+      SELECT c.conname AS cname, t.relname AS tname
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      WHERE t.relname IN ('claim','verdict_log','claim_relation','claim_feedback','golden_set_claim')
+        AND c.contype = 'c'
+        AND c.conname LIKE '%_check'
+        AND pg_get_constraintdef(c.oid) ~* '(not_applicable|derives_from|superseded_by|reasoned_over|fully_false|scope_too_broad|time_expired|modality_too_strong|context_mismatch|partially_correct|finalized_inferred|awaiting_pull|expired_reporter_unavailable|skipped_backpressure|not_needed|awaiting_reporter_push)'
+    LOOP
+      EXECUTE 'ALTER TABLE ' || quote_ident(_r.tname) || ' DROP CONSTRAINT ' || quote_ident(_r.cname);
+    END LOOP;
+
+    -- claim.verdict
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'claim_verdict_values') THEN
+      ALTER TABLE claim DROP CONSTRAINT claim_verdict_values;
+    END IF;
+    ALTER TABLE claim ADD CONSTRAINT claim_verdict_values
+      CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not-applicable'));
+    -- verdict_log.verdict
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'verdict_log_verdict_values') THEN
+      ALTER TABLE verdict_log DROP CONSTRAINT verdict_log_verdict_values;
+    END IF;
+    ALTER TABLE verdict_log ADD CONSTRAINT verdict_log_verdict_values
+      CHECK (verdict IN ('verified', 'disputed', 'unverified', 'not-applicable'));
+    -- golden_set_claim.expected_verdict
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'golden_set_expected_verdict_values') THEN
+      ALTER TABLE golden_set_claim DROP CONSTRAINT golden_set_expected_verdict_values;
+    END IF;
+    ALTER TABLE golden_set_claim ADD CONSTRAINT golden_set_expected_verdict_values
+      CHECK (expected_verdict IN ('verified', 'disputed', 'unverified', 'not-applicable'));
+    -- claim_relation.relation_type — relies on the table CHECK
+    -- defined inline; CONSTRAINT name auto-generated by Postgres.
+    -- Drop the implicit one then add a named version with kebab.
+    IF EXISTS (SELECT 1 FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+               WHERE t.relname = 'claim_relation' AND c.contype = 'c'
+                 AND pg_get_constraintdef(c.oid) LIKE '%relation_type%derives_from%') THEN
+      EXECUTE (SELECT 'ALTER TABLE claim_relation DROP CONSTRAINT ' || quote_ident(c.conname)
+               FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+               WHERE t.relname = 'claim_relation' AND c.contype = 'c'
+                 AND pg_get_constraintdef(c.oid) LIKE '%relation_type%derives_from%'
+               LIMIT 1);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'claim_relation_type_values') THEN
+      ALTER TABLE claim_relation ADD CONSTRAINT claim_relation_type_values
+        CHECK (relation_type IN ('supports','contradicts','derives-from','superseded-by','refines'));
+    END IF;
+    -- claim_feedback.application_method
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'claim_feedback_application_method_values') THEN
+      ALTER TABLE claim_feedback DROP CONSTRAINT claim_feedback_application_method_values;
+    END IF;
+    ALTER TABLE claim_feedback ADD CONSTRAINT claim_feedback_application_method_values
+      CHECK (application_method IN ('verified','applied','cited','reasoned-over'));
+    -- claim_feedback.failure_dimension (direct + inferred)
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'claim_feedback_failure_dimension_values') THEN
+      ALTER TABLE claim_feedback DROP CONSTRAINT claim_feedback_failure_dimension_values;
+    END IF;
+    ALTER TABLE claim_feedback ADD CONSTRAINT claim_feedback_failure_dimension_values
+      CHECK (failure_dimension IS NULL OR failure_dimension IN
+        ('fully-false','scope-too-broad','time-expired','modality-too-strong','context-mismatch','partially-correct'));
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'claim_feedback_failure_dimension_inferred_values') THEN
+      ALTER TABLE claim_feedback DROP CONSTRAINT claim_feedback_failure_dimension_inferred_values;
+    END IF;
+    ALTER TABLE claim_feedback ADD CONSTRAINT claim_feedback_failure_dimension_inferred_values
+      CHECK (failure_dimension_inferred IS NULL OR failure_dimension_inferred IN
+        ('fully-false','scope-too-broad','time-expired','modality-too-strong','context-mismatch','partially-correct'));
+    -- claim_feedback.enrichment_status
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'claim_feedback_enrichment_status_values') THEN
+      ALTER TABLE claim_feedback DROP CONSTRAINT claim_feedback_enrichment_status_values;
+    END IF;
+    ALTER TABLE claim_feedback ADD CONSTRAINT claim_feedback_enrichment_status_values
+      CHECK (enrichment_status IN (
+        'pending','finalized-inferred','awaiting-pull','enriched',
+        'expired-reporter-unavailable','skipped-backpressure','not-needed'
+      ));
+  END $$`;
 
   logger.info("migrations complete");
   await sql.end();

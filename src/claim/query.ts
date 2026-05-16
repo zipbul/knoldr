@@ -332,10 +332,10 @@ export async function fetchFactBundlesForEntries(
       case "contradicts":
         if (b.contradicts.length < maxEdges) b.contradicts.push(link);
         break;
-      case "derives_from":
+      case "derives-from":
         if (b.derivesFrom.length < maxEdges) b.derivesFrom.push(link);
         break;
-      case "superseded_by":
+      case "superseded-by":
         if (b.supersededBy.length < maxEdges) b.supersededBy.push(link);
         break;
       case "refines":

@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs from the same ref when a new push lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bunx tsc --noEmit
+
+      - name: Lint
+        run: bunx oxlint --type-aware
+
+      - name: Format
+        run: bunx oxfmt . --check
+
+      - name: Circular dependencies
+        run: bunx dpdm --no-warning --no-tree --exit-code circular:1 src
+
+      - name: Unused exports / files
+        run: bunx knip
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/unit
+
+  db-tests:
+    name: db tests (integration + e2e + migrate + lockstep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TEST_DATABASE_URL: postgres://knoldr:knoldr@localhost:5433/knoldr_test
+      DATABASE_URL: postgres://knoldr:knoldr@localhost:5433/knoldr_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+
+      # The project ships a Dockerfile.postgres that bakes pgvector +
+      # pgroonga into the official groonga/pgroonga image. We build
+      # and start it through docker compose so CI exercises the same
+      # extension stack production runs against.
+      - name: Start test DB
+        run: docker compose --profile test up -d --wait db-test
+
+      - name: Migrate test DB
+        run: bun run src/db/migrate.ts
+
+      - name: Integration tests (includes lockstep + migrate regression)
+        run: bun test tests/integration
+
+      - name: E2E tests
+        run: bun test tests/e2e
+
+      - name: Stop test DB
+        if: always()
+        run: docker compose --profile test down -v

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "bun build src/index.ts --target=bun --outfile=dist/knoldr.js --external @huggingface/transformers",
     "cycles": "bunx dpdm --no-warning --no-tree --exit-code circular:1 src",
-    "db:generate": "bunx drizzle-kit generate --schema ./src/db/schema.ts --out ./drizzle --dialect postgresql",
+    "db:generate": "bun run scripts/build-init.ts",
     "db:migrate": "bun run src/db/migrate.ts",
     "db:push": "bunx drizzle-kit push --schema ./src/db/schema.ts --dialect postgresql --url $DATABASE_URL",
     "dev": "bun run src/index.ts",

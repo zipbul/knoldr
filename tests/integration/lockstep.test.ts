@@ -222,4 +222,99 @@ describe('migration lockstep — schema.ts vs drizzle/*.sql', () => {
       await sql.end();
     }
   });
+
+  test.skipIf(!dbAvailable)('every foreign key declared in schema.ts exists in the migrated DB', async () => {
+    // `getTableConfig().foreignKeys[i].getName()` returns the FK
+    // name drizzle picks (matches drizzle-kit's emitted CONSTRAINT
+    // name). Each must resolve to an `f`-type pg_constraint row.
+    const expected = new Set<string>();
+    for (const value of Object.values(schema)) {
+      if (!isTable(value)) {
+        continue;
+      }
+      const cfg = getTableConfig(value as PgTable);
+      for (const fk of cfg.foreignKeys) {
+        expected.add(fk.getName());
+      }
+    }
+    const sql = postgres(adminUrl(tmpDb), { max: 1 });
+    try {
+      const rows = await sql<{ conname: string }[]>`
+        SELECT conname FROM pg_constraint WHERE contype = 'f'
+      `;
+      const live = new Set(rows.map(r => r.conname));
+      const missing = [...expected].filter(n => !live.has(n));
+      expect(missing).toEqual([]);
+      expect(expected.size).toBeGreaterThan(0);
+    } finally {
+      await sql.end();
+    }
+  });
+
+  test.skipIf(!dbAvailable)('every index declared in schema.ts exists in the migrated DB', async () => {
+    // Drizzle stores indexes under `cfg.indexes`; the runtime name
+    // is `index.config.name`. pg_indexes lists every live index;
+    // we compare the schema-declared set against the live set.
+    const expected = new Set<string>();
+    for (const value of Object.values(schema)) {
+      if (!isTable(value)) {
+        continue;
+      }
+      const cfg = getTableConfig(value as PgTable);
+      for (const idx of cfg.indexes) {
+        const name = (idx as unknown as { config: { name?: string } }).config?.name;
+        if (name) {
+          expected.add(name);
+        }
+      }
+    }
+    const sql = postgres(adminUrl(tmpDb), { max: 1 });
+    try {
+      const rows = await sql<{ indexname: string }[]>`
+        SELECT indexname FROM pg_indexes WHERE schemaname = 'public'
+      `;
+      const live = new Set(rows.map(r => r.indexname));
+      const missing = [...expected].filter(n => !live.has(n));
+      expect(missing).toEqual([]);
+      expect(expected.size).toBeGreaterThan(0);
+    } finally {
+      await sql.end();
+    }
+  });
+
+  test.skipIf(!dbAvailable)('every UNIQUE constraint declared in schema.ts exists in the migrated DB', async () => {
+    // Unique constraints sit on `cfg.uniqueConstraints`. Each
+    // entry's `.name` matches the pg_constraint conname for `u`
+    // contype rows.
+    const expected = new Set<string>();
+    for (const value of Object.values(schema)) {
+      if (!isTable(value)) {
+        continue;
+      }
+      const cfg = getTableConfig(value as PgTable);
+      for (const u of cfg.uniqueConstraints) {
+        if (u.name) {
+          expected.add(u.name);
+        }
+      }
+    }
+    if (expected.size === 0) {
+      // No table in schema.ts uses an explicit UNIQUE constraint
+      // — they all express uniqueness via UNIQUE INDEX instead,
+      // which is covered by the index test above. Skip without
+      // failing the suite.
+      return;
+    }
+    const sql = postgres(adminUrl(tmpDb), { max: 1 });
+    try {
+      const rows = await sql<{ conname: string }[]>`
+        SELECT conname FROM pg_constraint WHERE contype = 'u'
+      `;
+      const live = new Set(rows.map(r => r.conname));
+      const missing = [...expected].filter(n => !live.has(n));
+      expect(missing).toEqual([]);
+    } finally {
+      await sql.end();
+    }
+  });
 });

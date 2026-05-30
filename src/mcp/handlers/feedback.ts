@@ -11,7 +11,6 @@ const feedbackInputShape = {
   signal: z.enum(Signal),
   reason: z.enum(FeedbackReason).optional(),
   note: z.string().max(1000).optional(),
-  agentId: z.string().min(1).max(200),
 };
 const feedbackInputSchema = z.object(feedbackInputShape);
 
@@ -23,7 +22,7 @@ type FeedbackResult =
  * Feedback skill: atomic authority adjustment based on agent signal.
  * Rate-limited inside processFeedback (1/hour/(agent,entry), 10/hour/entry).
  */
-export async function handleFeedback(input: Record<string, unknown>): Promise<FeedbackResult> {
+export async function handleFeedback(input: Record<string, unknown>, callerAgentId: string): Promise<FeedbackResult> {
   let validated: z.infer<typeof feedbackInputSchema>;
   try {
     validated = feedbackInputSchema.parse(input);
@@ -38,7 +37,7 @@ export async function handleFeedback(input: Record<string, unknown>): Promise<Fe
     validated.reason && validated.note ? `${validated.reason}:${validated.note}` : (validated.reason ?? validated.note);
 
   try {
-    const { entryId, newAuthority } = await processFeedback(validated.entryId, validated.signal, reasonStored, validated.agentId);
+    const { entryId, newAuthority } = await processFeedback(validated.entryId, validated.signal, reasonStored, callerAgentId);
     // Route the structured reason to its downstream action (re-verify
     // queue / re-research / gap log). Best-effort — the authority
     // update already committed, so a routing failure must not surface
@@ -48,7 +47,7 @@ export async function handleFeedback(input: Record<string, unknown>): Promise<Fe
         await routeFeedbackAction({
           entryId: validated.entryId,
           reason: validated.reason,
-          agentId: validated.agentId,
+          agentId: callerAgentId,
           note: validated.note,
         });
       } catch (err) {

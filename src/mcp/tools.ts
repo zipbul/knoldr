@@ -42,6 +42,13 @@ async function guard(tool: string, run: () => Promise<unknown>): Promise<CallToo
   }
 }
 
+/** The caller's server-derived agent id, carried as MCP authInfo by the
+ * /mcp boundary (resolved from the bearer token). Used to attribute
+ * feedback/claim_feedback to the real caller, never a self-asserted id. */
+function callerAgent(extra: { authInfo?: { clientId?: string } }): string {
+  return extra.authInfo?.clientId ?? 'anonymous';
+}
+
 const FIND_DESC = `Search stored knowledge. If results are insufficient, automatically crawls the web to collect new data, then re-searches.
 
 Input: { query?, topic? (alias for query; omit both for filter-only browsing), domain?, tags?, language? (ISO 639-1), minAuthority? (0-1), minTrustLevel? "high"|"medium"|"low", limit? (default 10, max 50), cursor? }
@@ -56,16 +63,16 @@ sourceType ∈ official-docs|github-release|cve-db|official-blog|research-paper|
 Output: { ok: true, results[], storedCount, duplicateCount, rejectedCount } | { ok: false, error, message }
 Stored entries flow through claim extraction + verification automatically.`;
 
-const FEEDBACK_DESC = `Record a positive/negative signal against a stored entry; atomically adjusts the entry's authority used by future find rankings.
+const FEEDBACK_DESC = `Record a positive/negative signal against a stored entry; atomically adjusts the entry's authority used by future find rankings. Your agent identity comes from your authenticated token — do NOT pass an agent id.
 
-Input: { entryId, signal: "positive"|"negative", reason?, note? (<=1000), agentId }
-Rate limits: 1 per (agentId, entryId) per hour; 10 per entry per hour.
+Input: { entryId, signal: "positive"|"negative", reason?, note? (<=1000) }
+Rate limits: 1 per (caller, entryId) per hour; 10 per entry per hour.
 Output: { ok: true, entryId, newAuthority } | { ok: false, error: "rate_limited"|"not_found"|"invalid_input", message }`;
 
-const CLAIM_FEEDBACK_DESC = `Record claim-level structured feedback against a specific atomic claim (distinct from entry-level feedback). Captures HOW the claim was applied, the OUTCOME, and WHICH dimension failed.
+const CLAIM_FEEDBACK_DESC = `Record claim-level structured feedback against a specific atomic claim (distinct from entry-level feedback). Captures HOW the claim was applied, the OUTCOME, and WHICH dimension failed. Your reporter identity comes from your authenticated token — do NOT pass a reporter id.
 
-Input: { claimId, reporterAgentId, applicationMethod: "verified"|"applied"|"cited"|"reasoned-over", outcome: "held"|"failed"|"partial", failureDimension? (REQUIRED-ish for failed/partial, MUST be omitted when outcome="held"), partialTruth? (0-1), contextDomain?, contextTimeFrom?, contextTimeUntil? (ISO), contextScope?, counterSourceUrl?, counterClaimText?, counterNliScore? (0-1), auditNote? (<=4000) }
-Update mode: pass an existing feedbackId (matching reporterAgentId + claimId) to fill NULL fields on the same row.
+Input: { claimId, applicationMethod: "verified"|"applied"|"cited"|"reasoned-over", outcome: "held"|"failed"|"partial", failureDimension? (for failed/partial; MUST be omitted when outcome="held"), partialTruth? (0-1), contextDomain?, contextTimeFrom?, contextTimeUntil? (ISO), contextScope?, counterSourceUrl?, counterClaimText?, counterNliScore? (0-1), auditNote? (<=4000) }
+Update mode: pass an existing feedbackId (same caller + claimId) to fill NULL fields on the same row.
 Output: { ok: true, feedbackId, claimId, evidenceStrength, reporterFeedbackAuthority, enrichmentStatus, updated } | { ok: false, error, message, missingRequired? }`;
 
 const NEIGHBORS_DESC = `Walk the entity knowledge graph from a root entity. entity may be a ULID or a case-insensitive name (pass entityType to disambiguate when a name spans multiple types).
@@ -110,7 +117,7 @@ export function registerAllTools(server: McpServer): void {
   server.registerTool(
     'feedback',
     { title: 'Feedback', description: FEEDBACK_DESC, inputSchema: feedbackInputShape, annotations: { readOnlyHint: false } },
-    args => guard('feedback', () => handleFeedback(args as Record<string, unknown>)),
+    (args, extra) => guard('feedback', () => handleFeedback(args as Record<string, unknown>, callerAgent(extra))),
   );
 
   server.registerTool(
@@ -121,7 +128,7 @@ export function registerAllTools(server: McpServer): void {
       inputSchema: claimFeedbackInputShape,
       annotations: { readOnlyHint: false },
     },
-    args => guard('claim_feedback', () => handleClaimFeedback(args as Record<string, unknown>)),
+    (args, extra) => guard('claim_feedback', () => handleClaimFeedback(args as Record<string, unknown>, callerAgent(extra))),
   );
 
   server.registerTool(

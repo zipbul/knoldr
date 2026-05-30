@@ -30,7 +30,6 @@ const claimFeedbackInputShape = {
   feedbackId: z.string().min(1).max(200).optional(),
 
   claimId: z.string().min(1).max(200),
-  reporterAgentId: z.string().min(1).max(200),
   applicationMethod: z.enum(ApplicationMethod),
   outcome: z.enum(Outcome),
 
@@ -107,7 +106,7 @@ function initialEnrichmentStatus(input: ClaimFeedbackInput, strength: number): E
   return EnrichmentStatus.Pending;
 }
 
-async function handleClaimFeedback(input: Record<string, unknown>): Promise<ClaimFeedbackResult> {
+async function handleClaimFeedback(input: Record<string, unknown>, callerAgentId: string): Promise<ClaimFeedbackResult> {
   let validated: ClaimFeedbackInput;
   try {
     validated = claimFeedbackInputSchema.parse(input);
@@ -155,7 +154,7 @@ async function handleClaimFeedback(input: Record<string, unknown>): Promise<Clai
   // cannot overwrite their own past direct answers. Strength + status
   // are recomputed off the merged view.
   if (validated.feedbackId) {
-    return await updateExistingFeedback(validated);
+    return await updateExistingFeedback(validated, callerAgentId);
   }
 
   const evidenceStrength = computeEvidenceStrength(validated);
@@ -174,7 +173,7 @@ async function handleClaimFeedback(input: Record<string, unknown>): Promise<Clai
     await tx
       .insert(agentFeedbackAuthority)
       .values({
-        agentId: validated.reporterAgentId,
+        agentId: callerAgentId,
         feedbackAuthority: 0.5,
         totalFeedbacks: 1,
       })
@@ -192,7 +191,7 @@ async function handleClaimFeedback(input: Record<string, unknown>): Promise<Clai
     await tx.insert(claimFeedback).values({
       id: feedbackId,
       claimId: validated.claimId,
-      reporterAgentId: validated.reporterAgentId,
+      reporterAgentId: callerAgentId,
       applicationMethod: validated.applicationMethod,
       outcome: validated.outcome,
       failureDimension: validated.failureDimension ?? null,
@@ -209,7 +208,7 @@ async function handleClaimFeedback(input: Record<string, unknown>): Promise<Clai
       evidenceStrength,
     });
 
-    await adjustClaimAuthorityTx(tx, validated.claimId, validated.reporterAgentId, evidenceStrength, validated.outcome);
+    await adjustClaimAuthorityTx(tx, validated.claimId, callerAgentId, evidenceStrength, validated.outcome);
   });
 
   // Fire-and-forget immediate enrichment: only when the row actually
@@ -226,14 +225,14 @@ async function handleClaimFeedback(input: Record<string, unknown>): Promise<Clai
   const [authorityRow] = await getDb()
     .select({ fa: agentFeedbackAuthority.feedbackAuthority })
     .from(agentFeedbackAuthority)
-    .where(eq(agentFeedbackAuthority.agentId, validated.reporterAgentId))
+    .where(eq(agentFeedbackAuthority.agentId, callerAgentId))
     .limit(1);
 
   logger.info(
     {
       feedbackId,
       claimId: validated.claimId,
-      reporter: validated.reporterAgentId,
+      reporter: callerAgentId,
       outcome: validated.outcome,
       evidenceStrength,
       enrichmentStatus,
@@ -252,7 +251,7 @@ async function handleClaimFeedback(input: Record<string, unknown>): Promise<Clai
   };
 }
 
-async function updateExistingFeedback(input: ClaimFeedbackInput): Promise<ClaimFeedbackResult> {
+async function updateExistingFeedback(input: ClaimFeedbackInput, callerAgentId: string): Promise<ClaimFeedbackResult> {
   const [row] = await getDb()
     .select({
       id: claimFeedback.id,
@@ -282,7 +281,7 @@ async function updateExistingFeedback(input: ClaimFeedbackInput): Promise<ClaimF
       message: `feedback ${input.feedbackId} does not exist`,
     };
   }
-  if (row.reporterAgentId !== input.reporterAgentId) {
+  if (row.reporterAgentId !== callerAgentId) {
     return {
       ok: false,
       error: 'reporter_mismatch',
@@ -360,21 +359,21 @@ async function updateExistingFeedback(input: ClaimFeedbackInput): Promise<ClaimF
       .where(eq(claimFeedback.id, row.id));
 
     if (strengthDelta !== 0) {
-      await adjustClaimAuthorityTx(tx, row.claimId, input.reporterAgentId, strengthDelta, effectiveOutcome);
+      await adjustClaimAuthorityTx(tx, row.claimId, callerAgentId, strengthDelta, effectiveOutcome);
     }
   });
 
   const [authorityRow] = await getDb()
     .select({ fa: agentFeedbackAuthority.feedbackAuthority })
     .from(agentFeedbackAuthority)
-    .where(eq(agentFeedbackAuthority.agentId, input.reporterAgentId))
+    .where(eq(agentFeedbackAuthority.agentId, callerAgentId))
     .limit(1);
 
   logger.info(
     {
       feedbackId: row.id,
       claimId: input.claimId,
-      reporter: input.reporterAgentId,
+      reporter: callerAgentId,
       newStrength,
       newStatus,
     },

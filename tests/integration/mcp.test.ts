@@ -62,7 +62,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   await client?.close();
-  server?.stop(true);
+  await server?.stop(true);
   stopMockServers();
   if (dbAvailable) {
     await teardownTestDb();
@@ -171,7 +171,7 @@ describe('MCP — feedback', () => {
     const entryId = seeded[0]!.entryId;
     expect(entryId).toBeTruthy();
 
-    const res = await client!.callTool({ name: 'feedback', arguments: { entryId, signal: 'positive', agentId: 'mcp-agent-1' } });
+    const res = await client!.callTool({ name: 'feedback', arguments: { entryId, signal: 'positive' } });
     const data = res.structuredContent as { ok?: boolean; newAuthority?: number };
     expect(data.ok).toBe(true);
     expect(data.newAuthority ?? 0).toBeGreaterThan(0.8);
@@ -190,13 +190,13 @@ describe('MCP — feedback', () => {
 
     const first = await client!.callTool({
       name: 'feedback',
-      arguments: { entryId, signal: 'positive', agentId: 'mcp-rl-agent' },
+      arguments: { entryId, signal: 'positive' },
     });
     expect((first.structuredContent as { ok?: boolean }).ok).toBe(true);
 
     const second = await client!.callTool({
       name: 'feedback',
-      arguments: { entryId, signal: 'negative', agentId: 'mcp-rl-agent' },
+      arguments: { entryId, signal: 'negative' },
     });
     const data = second.structuredContent as { ok?: boolean; error?: string };
     expect(data.ok).toBe(false);

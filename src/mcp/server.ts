@@ -109,13 +109,19 @@ async function handleMcp(
   if (!originAllowed(req.headers.get('origin'), host)) {
     return new Response('Forbidden', { status: 403 });
   }
-  if (!authenticate(req)) {
+  const agentId = authenticate(req);
+  if (agentId === null) {
     return unauthorized();
   }
 
+  // Identity is server-derived from the bearer token; carry it as MCP
+  // authInfo so feedback / claim_feedback attribute to the real caller
+  // instead of a self-asserted id.
+  const authInfo = { token: 'mcp-bearer', clientId: agentId, scopes: [] as string[] };
+
   // Enforce the body cap by counting actual bytes, then hand the
   // pre-parsed body to the transport so it doesn't re-read the stream.
-  let options: { parsedBody?: unknown } | undefined;
+  let parsedBody: unknown;
   if (req.method === 'POST') {
     const declared = Number(req.headers.get('content-length') ?? -1);
     if (declared > MAX_BODY_BYTES) {
@@ -126,7 +132,7 @@ async function handleMcp(
       return new Response('Payload too large', { status: 413 });
     }
     try {
-      options = { parsedBody: JSON.parse(new TextDecoder().decode(buf)) };
+      parsedBody = JSON.parse(new TextDecoder().decode(buf));
     } catch {
       return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' }, id: null }), {
         status: 400,
@@ -161,7 +167,7 @@ async function handleMcp(
     await mcp.connect(transport);
   }
 
-  return transport.handleRequest(req, options);
+  return transport.handleRequest(req, parsedBody === undefined ? { authInfo } : { authInfo, parsedBody });
 }
 
 export { startMcpServer };

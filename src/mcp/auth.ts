@@ -1,38 +1,79 @@
 import { timingSafeEqual } from 'node:crypto';
 
+const ANONYMOUS_AGENT = 'anonymous';
+
 /**
- * Validate Bearer token from Authorization header.
+ * Parse the optional per-agent token registry:
+ *   KNOLDR_AGENT_TOKENS="alice:tok_alice,bob:tok_bob"
+ * Each token maps to a distinct, server-known agent id so the caller's
+ * identity can be derived from the credential rather than self-asserted.
+ */
+function parseAgentTokens(): Map<string, string> {
+  const raw = process.env.KNOLDR_AGENT_TOKENS;
+  const map = new Map<string, string>();
+  if (!raw) {
+    return map;
+  }
+  for (const pair of raw.split(',')) {
+    const idx = pair.indexOf(':');
+    if (idx <= 0) {
+      continue;
+    }
+    const agentId = pair.slice(0, idx).trim();
+    const token = pair.slice(idx + 1).trim();
+    if (agentId && token) {
+      map.set(agentId, token);
+    }
+  }
+  return map;
+}
+
+function extractBearer(request: Request): string | null {
+  const authHeader = request.headers.get('authorization');
+  if (!authHeader) {
+    return null;
+  }
+  const [scheme, value] = authHeader.split(' ');
+  if (!scheme || !value || scheme.toLowerCase() !== 'bearer') {
+    return null;
+  }
+  return value;
+}
+
+/**
+ * Resolve the caller's principal (agent id) from the Bearer token, or
+ * null if unauthorized. Identity is SERVER-DERIVED from the token — a
+ * caller's self-asserted agent id is never trusted for authority weighting.
  *
- * Fail-closed policy:
- *  - In production (NODE_ENV=production) the token is REQUIRED. A missing
- *    KNOLDR_API_TOKEN throws at server start via `requireTokenOrThrow`;
- *    this function therefore treats unset token as a server error and
- *    rejects the request rather than silently opening access.
- *  - In non-production an unset token means "no auth configured" and
- *    requests pass — this is explicit for development ergonomics.
+ *  - KNOLDR_AGENT_TOKENS ("a:tokA,b:tokB") → that agent's id
+ *  - KNOLDR_API_TOKEN (single shared) → KNOLDR_DEFAULT_AGENT_ID (default "default")
+ *  - no tokens configured + non-production → "anonymous" (loopback dev only;
+ *    requireTokenOrThrow already refused a non-loopback bind without a token)
  *
  * Comparison uses node:crypto `timingSafeEqual` over fixed-size buffers so
  * an attacker cannot learn token bytes from response-time variance.
  */
-function authenticate(request: Request): boolean {
-  const token = process.env.KNOLDR_API_TOKEN;
-  if (!token) {
-    if (process.env.NODE_ENV === 'production') {
-      return false;
+function authenticate(request: Request): string | null {
+  const agentTokens = parseAgentTokens();
+  const shared = process.env.KNOLDR_API_TOKEN;
+
+  if (agentTokens.size === 0 && !shared) {
+    return process.env.NODE_ENV === 'production' ? null : ANONYMOUS_AGENT;
+  }
+
+  const presented = extractBearer(request);
+  if (!presented) {
+    return null;
+  }
+  for (const [agentId, token] of agentTokens) {
+    if (constantTimeEqual(presented, token)) {
+      return agentId;
     }
-    return true;
   }
-
-  const authHeader = request.headers.get('authorization');
-  if (!authHeader) {
-    return false;
+  if (shared && constantTimeEqual(presented, shared)) {
+    return process.env.KNOLDR_DEFAULT_AGENT_ID ?? 'default';
   }
-  const [scheme, value] = authHeader.split(' ');
-  if (!scheme || !value || scheme.toLowerCase() !== 'bearer') {
-    return false;
-  }
-
-  return constantTimeEqual(value, token);
+  return null;
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -49,7 +90,7 @@ function isLoopbackHost(host: string): boolean {
  * server with no token is still allowed (and warns at startup).
  */
 function requireTokenOrThrow(): void {
-  const hasToken = !!process.env.KNOLDR_API_TOKEN;
+  const hasToken = !!process.env.KNOLDR_API_TOKEN || !!process.env.KNOLDR_AGENT_TOKENS;
   if (hasToken) {
     return;
   }

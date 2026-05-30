@@ -14,12 +14,12 @@
 import { eq, sql } from 'drizzle-orm';
 import { ulid } from 'ulid';
 
-import { handleClaimFeedback } from '../src/mcp/handlers/claim-feedback';
 import { recordVerdictTransition } from '../src/claim/authority-learn';
 import { fetchFactBundlesForEntries } from '../src/claim/query';
 import { writeClaimEdges } from '../src/claim/relation-writer';
 import { getDb } from '../src/db/connection';
 import { entry, claim, claimRelation, claimFeedback, agentFeedbackAuthority } from '../src/db/schema';
+import { handleClaimFeedback } from '../src/mcp/handlers/claim-feedback';
 import { ApplicationMethod, ClaimType, EntryStatus, FailureDimension, Outcome, RelationType, Verdict } from '../src/score/enums';
 
 async function setupTwoClaims(): Promise<{
@@ -139,15 +139,17 @@ async function main(): Promise<void> {
 
   // 5. claim_feedback insert → claim.authority moves
   const beforeAuth = (await getDb().select({ a: claim.authority }).from(claim).where(eq(claim.id, claimAId)).limit(1))[0]!.a;
-  const fbResult = await handleClaimFeedback({
-    claimId: claimAId,
-    reporterAgentId: 'smoke-agent',
-    applicationMethod: ApplicationMethod.Applied,
-    outcome: Outcome.Failed,
-    failureDimension: FailureDimension.FullyFalse,
-    counterSourceUrl: 'https://example.com/x',
-    counterNliScore: 0.9,
-  });
+  const fbResult = await handleClaimFeedback(
+    {
+      claimId: claimAId,
+      applicationMethod: ApplicationMethod.Applied,
+      outcome: Outcome.Failed,
+      failureDimension: FailureDimension.FullyFalse,
+      counterSourceUrl: 'https://example.com/x',
+      counterNliScore: 0.9,
+    },
+    'smoke-agent',
+  );
   console.log('[5] claim_feedback result:', JSON.stringify(fbResult));
   if (!('ok' in fbResult) || !fbResult.ok) {
     throw new Error('feedback failed');
@@ -161,14 +163,16 @@ async function main(): Promise<void> {
   }
 
   // 6. Feedback update mode (same feedbackId, different counter)
-  const fbUpdate = await handleClaimFeedback({
-    feedbackId: fbResult.feedbackId,
-    claimId: claimAId,
-    reporterAgentId: 'smoke-agent',
-    applicationMethod: ApplicationMethod.Applied,
-    outcome: Outcome.Failed,
-    partialTruth: 0.2,
-  });
+  const fbUpdate = await handleClaimFeedback(
+    {
+      feedbackId: fbResult.feedbackId,
+      claimId: claimAId,
+      applicationMethod: ApplicationMethod.Applied,
+      outcome: Outcome.Failed,
+      partialTruth: 0.2,
+    },
+    'smoke-agent',
+  );
   console.log('[6] update mode result:', JSON.stringify(fbUpdate));
   if (!('ok' in fbUpdate) || !fbUpdate.ok || !fbUpdate.updated) {
     throw new Error('update mode failed');
@@ -192,13 +196,15 @@ async function main(): Promise<void> {
   }
 
   // 8. Reject feedbackId/claimId mismatch
-  const mismatchResult = await handleClaimFeedback({
-    feedbackId: fbResult.feedbackId,
-    claimId: claimBId, // wrong claim
-    reporterAgentId: 'smoke-agent',
-    applicationMethod: ApplicationMethod.Applied,
-    outcome: Outcome.Failed,
-  });
+  const mismatchResult = await handleClaimFeedback(
+    {
+      feedbackId: fbResult.feedbackId,
+      claimId: claimBId, // wrong claim
+      applicationMethod: ApplicationMethod.Applied,
+      outcome: Outcome.Failed,
+    },
+    'smoke-agent',
+  );
   console.log('[8] feedbackId/claimId mismatch:', JSON.stringify(mismatchResult));
   if ('ok' in mismatchResult && mismatchResult.ok) {
     throw new Error('mismatch should have been rejected');

@@ -35,15 +35,14 @@ import { logger } from '../../observability/logger';
 // schema. Validating twice is intentional — the outer cap fails fast on
 // 50MB blobs without bringing the full engine schema into agent-facing
 // error surface.
-const envelopeSchema = z
-  .object({
-    raw: z.string().max(200_000).optional(),
-    entries: z.array(z.unknown()).max(20).optional(),
-    sources: z.array(z.unknown()).max(20).optional(),
-  })
-  .refine(v => v.raw !== undefined || v.entries !== undefined, {
-    message: "ingest requires either 'raw' or 'entries'",
-  });
+const ingestInputShape = {
+  raw: z.string().max(200_000).optional(),
+  entries: z.array(z.unknown()).max(20).optional(),
+  sources: z.array(z.unknown()).max(20).optional(),
+};
+const envelopeSchema = z.object(ingestInputShape).refine(v => v.raw !== undefined || v.entries !== undefined, {
+  message: "ingest requires either 'raw' or 'entries'",
+});
 
 type IngestSkillResult =
   | { ok: true; results: IngestResult[]; storedCount: number; duplicateCount: number; rejectedCount: number }
@@ -97,3 +96,5 @@ export async function handleIngest(input: Record<string, unknown>): Promise<Inge
     rejectedCount,
   };
 }
+
+export { ingestInputShape };

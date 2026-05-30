@@ -41,6 +41,12 @@ jobs:
       - name: Unused exports / files
         run: bunx knip
 
+      # The production bundle is what the image runs; a bundler-breaking
+      # change (e.g. a new dependency that won't bundle) must fail here,
+      # not at deploy.
+      - name: Build smoke (bundle must compile)
+        run: bun run build && test -s dist/knoldr.js
+
   unit:
     name: unit tests
     runs-on: ubuntu-latest

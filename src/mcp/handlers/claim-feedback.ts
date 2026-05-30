@@ -23,31 +23,33 @@ import { logger } from '../../observability/logger';
 import { ApplicationMethod, EnrichmentStatus, FailureDimension, Outcome } from '../../score/enums';
 import { computeFeedbackEvidenceStrength } from '../../score/feedback-strength';
 
+const claimFeedbackInputShape = {
+  // When set, the call updates an existing row instead of inserting
+  // a new one. Used by reporters that learned more after their
+  // initial submission. The row's reporter_agent_id must match.
+  feedbackId: z.string().min(1).max(200).optional(),
+
+  claimId: z.string().min(1).max(200),
+  reporterAgentId: z.string().min(1).max(200),
+  applicationMethod: z.enum(ApplicationMethod),
+  outcome: z.enum(Outcome),
+
+  failureDimension: z.enum(FailureDimension).optional(),
+  partialTruth: z.number().min(0).max(1).optional(),
+  contextDomain: z.string().max(100).optional(),
+  contextTimeFrom: z.iso.datetime().optional(),
+  contextTimeUntil: z.iso.datetime().optional(),
+  contextScope: z.record(z.string(), z.unknown()).optional(),
+  counterSourceUrl: z.url().max(2000).optional(),
+  counterClaimText: z.string().max(2000).optional(),
+  counterNliScore: z.number().min(0).max(1).optional(),
+  auditNote: z.string().max(4000).optional(),
+};
+
+// Held outcomes can't carry a failure dimension — the claim worked
+// as advertised. Failed/partial may but aren't required to.
 const claimFeedbackInputSchema = z
-  .object({
-    // When set, the call updates an existing row instead of inserting
-    // a new one. Used by reporters that learned more after their
-    // initial submission. The row's reporter_agent_id must match.
-    feedbackId: z.string().min(1).max(200).optional(),
-
-    claimId: z.string().min(1).max(200),
-    reporterAgentId: z.string().min(1).max(200),
-    applicationMethod: z.enum(ApplicationMethod),
-    outcome: z.enum(Outcome),
-
-    failureDimension: z.enum(FailureDimension).optional(),
-    partialTruth: z.number().min(0).max(1).optional(),
-    contextDomain: z.string().max(100).optional(),
-    contextTimeFrom: z.iso.datetime().optional(),
-    contextTimeUntil: z.iso.datetime().optional(),
-    contextScope: z.record(z.string(), z.unknown()).optional(),
-    counterSourceUrl: z.url().max(2000).optional(),
-    counterClaimText: z.string().max(2000).optional(),
-    counterNliScore: z.number().min(0).max(1).optional(),
-    auditNote: z.string().max(4000).optional(),
-  })
-  // Held outcomes can't carry a failure dimension — the claim worked
-  // as advertised. Failed/partial may but aren't required to.
+  .object(claimFeedbackInputShape)
   .refine(v => !(v.outcome === Outcome.Held && v.failureDimension !== undefined), {
     message: `failureDimension must not be set when outcome='${Outcome.Held}'`,
     path: ['failureDimension'],
@@ -439,4 +441,4 @@ async function adjustClaimAuthorityTx(
   `);
 }
 
-export { handleClaimFeedback };
+export { handleClaimFeedback, claimFeedbackInputShape };

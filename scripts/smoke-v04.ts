@@ -14,7 +14,7 @@
 import { eq, sql } from 'drizzle-orm';
 import { ulid } from 'ulid';
 
-import { handleClaimFeedback } from '../src/a2a/handlers/claim-feedback';
+import { handleClaimFeedback } from '../src/mcp/handlers/claim-feedback';
 import { recordVerdictTransition } from '../src/claim/authority-learn';
 import { fetchFactBundlesForEntries } from '../src/claim/query';
 import { writeClaimEdges } from '../src/claim/relation-writer';

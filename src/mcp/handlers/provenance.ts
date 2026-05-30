@@ -13,10 +13,11 @@ import { getDb } from '../../db/connection';
 const MAX_DEPTH = 8;
 const MAX_RESULTS = 100;
 
-const inputSchema = z.object({
+const provenanceInputShape = {
   claimId: z.string().min(1).max(200),
   maxDepth: z.number().int().min(1).max(MAX_DEPTH).default(4),
-});
+};
+const inputSchema = z.object(provenanceInputShape);
 
 interface ProvenanceNode {
   claimId: string;
@@ -103,3 +104,5 @@ export async function handleProvenance(input: Record<string, unknown>): Promise<
     })),
   };
 }
+
+export { provenanceInputShape };

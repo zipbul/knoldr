@@ -1,17 +1,15 @@
 import { z } from 'zod';
 
 import type { SearchResult } from '../../search/search';
-import type { Progress } from '../types';
 
 import { fetchClaimsForEntries, fetchFactBundlesForEntries, fetchFactualityForEntries } from '../../claim/query';
 import { research } from '../../collect/research';
 import { logger } from '../../observability/logger';
 import { SortBy, TrustLevel } from '../../score/enums';
 import { search, explore } from '../../search/search';
+import { NOOP_PROGRESS, type Progress } from '../progress';
 
-const NOOP_PROGRESS: Progress = { emit: () => {} };
-
-const findInputSchema = z.object({
+const findInputShape = {
   query: z.string().min(1).max(1000).optional(),
   topic: z.string().min(1).max(1000).optional(),
   domain: z.string().max(50).optional(),
@@ -24,7 +22,8 @@ const findInputSchema = z.object({
   minTrustLevel: z.enum(TrustLevel).optional(),
   limit: z.number().int().min(1).max(50).default(10),
   cursor: z.string().optional(),
-});
+};
+const findInputSchema = z.object(findInputShape);
 
 async function handleFind(input: Record<string, unknown>, progress: Progress = NOOP_PROGRESS): Promise<unknown> {
   const validated = findInputSchema.parse(input);
@@ -185,4 +184,4 @@ async function formatResult(result: SearchResult, researched: boolean, researchS
   };
 }
 
-export { handleFind };
+export { handleFind, findInputShape };

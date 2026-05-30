@@ -6,13 +6,14 @@ import { FeedbackReason, Signal } from '../../score/enums';
 import { processFeedback, RateLimitError } from '../../score/feedback';
 import { routeFeedbackAction } from '../../score/feedback-router';
 
-const feedbackInputSchema = z.object({
+const feedbackInputShape = {
   entryId: z.string().min(1).max(200),
   signal: z.enum(Signal),
   reason: z.enum(FeedbackReason).optional(),
   note: z.string().max(1000).optional(),
   agentId: z.string().min(1).max(200),
-});
+};
+const feedbackInputSchema = z.object(feedbackInputShape);
 
 type FeedbackResult =
   | { ok: true; entryId: string; newAuthority: number }
@@ -73,3 +74,5 @@ export async function handleFeedback(input: Record<string, unknown>): Promise<Fe
     throw err;
   }
 }
+
+export { feedbackInputShape };

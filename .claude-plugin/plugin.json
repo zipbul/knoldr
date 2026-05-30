@@ -1,0 +1,8 @@
+{
+  "name": "knoldr",
+  "version": "0.3.0",
+  "description": "Knoldr — AI-native verified-fact warehouse exposed as an MCP server. A SessionStart hook brings up the Postgres + SearXNG + 24/7 worker backend via docker compose; .mcp.json registers the Knoldr MCP tools (find, ingest, feedback, claim_feedback, neighbors, provenance, contradictions).",
+  "author": { "name": "zipbul" },
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}

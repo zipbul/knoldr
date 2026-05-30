@@ -14,15 +14,14 @@ import { getDb } from '../../db/connection';
 
 const MAX_RESULTS = 50;
 
-const inputSchema = z
-  .object({
-    claimId: z.string().min(1).max(200).optional(),
-    entity: z.string().min(1).max(200).optional(),
-    limit: z.number().int().min(1).max(MAX_RESULTS).default(20),
-  })
-  .refine(v => v.claimId || v.entity, {
-    message: 'either claimId or entity must be provided',
-  });
+const contradictionsInputShape = {
+  claimId: z.string().min(1).max(200).optional(),
+  entity: z.string().min(1).max(200).optional(),
+  limit: z.number().int().min(1).max(MAX_RESULTS).default(20),
+};
+const inputSchema = z.object(contradictionsInputShape).refine(v => v.claimId || v.entity, {
+  message: 'either claimId or entity must be provided',
+});
 
 interface ContradictionPair {
   fromClaimId: string;
@@ -122,3 +121,5 @@ export async function handleContradictions(input: Record<string, unknown>): Prom
     })),
   };
 }
+
+export { contradictionsInputShape };

@@ -35,14 +35,30 @@ function authenticate(request: Request): boolean {
   return constantTimeEqual(value, token);
 }
 
+function isLoopbackHost(host: string): boolean {
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '::ffff:127.0.0.1';
+}
+
 /**
- * Call from server startup. Throws when running in production without a
- * token so the process refuses to start rather than accepting traffic
- * anonymously.
+ * Call from server startup. Refuses to start when the listener would be
+ * both reachable and unauthenticated:
+ *  - production without a token (existing fail-closed policy), or
+ *  - any environment binding a NON-loopback host without a token.
+ * The genuine danger is "reachable + unauthenticated", so that
+ * combination fails closed regardless of NODE_ENV. A loopback-only dev
+ * server with no token is still allowed (and warns at startup).
  */
 function requireTokenOrThrow(): void {
-  if (process.env.NODE_ENV === 'production' && !process.env.KNOLDR_API_TOKEN) {
+  const hasToken = !!process.env.KNOLDR_API_TOKEN;
+  if (hasToken) {
+    return;
+  }
+  if (process.env.NODE_ENV === 'production') {
     throw new Error('KNOLDR_API_TOKEN is required in production (fail-closed auth policy)');
+  }
+  const host = process.env.KNOLDR_HOST ?? '127.0.0.1';
+  if (!isLoopbackHost(host)) {
+    throw new Error(`KNOLDR_API_TOKEN is required when binding a non-loopback host (KNOLDR_HOST=${host})`);
   }
 }
 

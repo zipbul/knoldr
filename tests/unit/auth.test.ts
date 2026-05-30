@@ -1,6 +1,6 @@
 import { describe, test, expect, afterEach } from 'bun:test';
 
-import { authenticate } from '../../src/a2a/auth';
+import { authenticate } from '../../src/mcp/auth';
 
 describe('authenticate', () => {
   const originalToken = process.env.KNOLDR_API_TOKEN;
@@ -15,13 +15,13 @@ describe('authenticate', () => {
 
   test('allows all requests when no token configured', () => {
     delete process.env.KNOLDR_API_TOKEN;
-    const req = new Request('http://localhost/a2a', { method: 'POST' });
+    const req = new Request('http://localhost/mcp', { method: 'POST' });
     expect(authenticate(req)).toBe(true);
   });
 
   test('accepts valid Bearer token', () => {
     process.env.KNOLDR_API_TOKEN = 'test-secret-123';
-    const req = new Request('http://localhost/a2a', {
+    const req = new Request('http://localhost/mcp', {
       method: 'POST',
       headers: { Authorization: 'Bearer test-secret-123' },
     });
@@ -30,13 +30,13 @@ describe('authenticate', () => {
 
   test('rejects missing Authorization header', () => {
     process.env.KNOLDR_API_TOKEN = 'test-secret-123';
-    const req = new Request('http://localhost/a2a', { method: 'POST' });
+    const req = new Request('http://localhost/mcp', { method: 'POST' });
     expect(authenticate(req)).toBe(false);
   });
 
   test('rejects wrong token', () => {
     process.env.KNOLDR_API_TOKEN = 'test-secret-123';
-    const req = new Request('http://localhost/a2a', {
+    const req = new Request('http://localhost/mcp', {
       method: 'POST',
       headers: { Authorization: 'Bearer wrong-token' },
     });
@@ -45,7 +45,7 @@ describe('authenticate', () => {
 
   test('rejects non-Bearer scheme', () => {
     process.env.KNOLDR_API_TOKEN = 'test-secret-123';
-    const req = new Request('http://localhost/a2a', {
+    const req = new Request('http://localhost/mcp', {
       method: 'POST',
       headers: { Authorization: 'Basic dGVzdDp0ZXN0' },
     });
@@ -54,7 +54,7 @@ describe('authenticate', () => {
 
   test('case-insensitive Bearer scheme', () => {
     process.env.KNOLDR_API_TOKEN = 'test-secret-123';
-    const req = new Request('http://localhost/a2a', {
+    const req = new Request('http://localhost/mcp', {
       method: 'POST',
       headers: { Authorization: 'bearer test-secret-123' },
     });

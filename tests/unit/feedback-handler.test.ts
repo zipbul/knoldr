@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 
-import { handleFeedback } from '../../src/a2a/handlers/feedback';
+import { handleFeedback } from '../../src/mcp/handlers/feedback';
 
 describe('handleFeedback — input validation (no DB)', () => {
   test('missing entryId returns invalid_input', async () => {

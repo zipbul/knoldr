@@ -1,4 +1,4 @@
-import type { Progress } from '../a2a/types';
+import type { Progress } from '../mcp/progress';
 
 import { ingest } from '../ingest/engine';
 import { parseStoreInput } from '../ingest/validate';

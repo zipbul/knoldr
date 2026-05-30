@@ -73,8 +73,12 @@ async function handleServe(args: string[]) {
     process.env.KNOLDR_HOST = values.host;
   }
 
-  const { startServer } = await import('../a2a/server');
-  startServer();
+  const { configureOnnxRuntime } = await import('../llm/onnx-env');
+  await configureOnnxRuntime();
+  const { startMcpServer } = await import('../mcp/server');
+  const { startWorkers } = await import('../workers');
+  startMcpServer();
+  startWorkers();
 
   // Keep process alive — server runs indefinitely
   await new Promise(() => {});

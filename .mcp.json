@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "knoldr": {
+      "type": "http",
+      "url": "${KNOLDR_URL:-http://localhost:5100}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${KNOLDR_API_TOKEN}"
+      }
+    }
+  }
+}

@@ -151,11 +151,11 @@ function startMockOllamaServer(port = 11499) {
 /** Stop all mock servers */
 function stopMockServers() {
   if (embeddingServer) {
-    embeddingServer.stop();
+    void embeddingServer.stop();
     embeddingServer = null;
   }
   if (ollamaServer) {
-    ollamaServer.stop();
+    void ollamaServer.stop();
     ollamaServer = null;
   }
 }

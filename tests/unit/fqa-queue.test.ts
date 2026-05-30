@@ -4,7 +4,7 @@ import { enqueueEnrichment, pendingCount } from '../../src/fqa/queue';
 
 // Mock runEnrichment so the queue test doesn't hit the DB.
 const calls: string[] = [];
-mock.module('../../src/fqa/enrich', () => ({
+void mock.module('../../src/fqa/enrich', () => ({
   runEnrichment: async (id: string) => {
     calls.push(id);
     return null;

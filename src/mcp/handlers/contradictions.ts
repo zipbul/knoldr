@@ -11,6 +11,7 @@ import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { getDb } from '../../db/connection';
+import { RelationType } from '../../score/enums';
 
 const MAX_RESULTS = 50;
 
@@ -68,7 +69,7 @@ export async function handleContradictions(input: Record<string, unknown>): Prom
       FROM claim_relation cr
       JOIN claim c1 ON c1.id = cr.source_claim_id
       JOIN claim c2 ON c2.id = cr.target_claim_id
-      WHERE cr.relation_type = 'contradicts'
+      WHERE cr.relation_type = ${RelationType.Contradicts}
         AND (cr.source_claim_id = ${validated.claimId} OR cr.target_claim_id = ${validated.claimId})
       ORDER BY cr.weight DESC, cr.created_at DESC
       LIMIT ${limit}
@@ -96,7 +97,7 @@ export async function handleContradictions(input: Record<string, unknown>): Prom
       FROM claim_relation cr
       JOIN claim c1 ON c1.id = cr.source_claim_id
       JOIN claim c2 ON c2.id = cr.target_claim_id
-      WHERE cr.relation_type = 'contradicts'
+      WHERE cr.relation_type = ${RelationType.Contradicts}
         AND (
           cr.source_claim_id IN (SELECT claim_id FROM entity_claims)
           OR cr.target_claim_id IN (SELECT claim_id FROM entity_claims)

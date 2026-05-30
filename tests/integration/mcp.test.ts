@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 
-import { IngestAction } from '../../src/score/enums';
+import { IngestAction, SourceType } from '../../src/score/enums';
 import { setupTestDb, cleanTestDb, teardownTestDb } from '../helpers/db';
 import { startMockEmbeddingServer, startMockOllamaServer, stopMockServers } from '../helpers/mock-apis';
 
@@ -69,10 +69,13 @@ afterAll(async () => {
   }
 });
 
-async function seed(entries: Array<{ title: string; content: string; domain: string[]; tags?: string[]; language?: string }>) {
+async function seed(
+  entries: Array<{ title: string; content: string; domain: string[]; tags?: string[]; language?: string }>,
+  sources?: Array<{ url: string; sourceType: string }>,
+) {
   const { ingest } = await import('../../src/ingest/engine');
   const { parseStoreInput } = await import('../../src/ingest/validate');
-  return ingest(parseStoreInput({ entries }));
+  return ingest(parseStoreInput(sources ? { entries, sources } : { entries }));
 }
 
 // ============================================================
@@ -160,14 +163,18 @@ describe('MCP — find', () => {
 // ============================================================
 describe('MCP — feedback', () => {
   test.skipIf(!dbAvailable)('positive feedback raises authority', async () => {
-    const seeded = await seed([
-      {
-        title: 'Feedback test entry',
-        content: 'Entry used to exercise the feedback tool end to end via MCP.',
-        domain: ['testing'],
-        language: 'en',
-      },
-    ]);
+    const seeded = await seed(
+      [
+        {
+          title: 'Feedback test entry',
+          content: 'Entry used to exercise the feedback tool end to end via MCP.',
+          domain: ['testing'],
+          language: 'en',
+        },
+      ],
+      // High-authority source so a single positive boost clears the 0.8 bar.
+      [{ url: 'https://docs.example.com', sourceType: SourceType.OfficialDocs }],
+    );
     const entryId = seeded[0]!.entryId;
     expect(entryId).toBeTruthy();
 

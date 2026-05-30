@@ -27,7 +27,7 @@ function installShutdown(httpServer: ReturnType<typeof startMcpServer>): void {
     shuttingDown = true;
     logger.info({ signal }, 'shutting down');
     stopWorkers();
-    httpServer.stop(true);
+    void httpServer.stop(true);
     // Active withClusterLock callbacks release their advisory lock in their
     // own finally{}, so no lock leaks on exit.
     process.exit(0);

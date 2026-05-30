@@ -13,7 +13,7 @@ interface MockEmbeddingResponse {
 
 /** Create a deterministic fake embedding (384-dim, based on text hash) */
 function fakeEmbedding(text: string): number[] {
-  const vec = new Array(384).fill(0);
+  const vec = Array.from({ length: 384 }, () => 0);
   for (let i = 0; i < text.length && i < 384; i++) {
     vec[i] = (text.charCodeAt(i) % 100) / 100;
   }

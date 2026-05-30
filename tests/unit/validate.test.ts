@@ -389,7 +389,7 @@ describe('decomposeResponseSchema', () => {
   });
 
   test('defaults tags to empty array', () => {
-    const { tags, ...noTags } = validEntry;
+    const { tags: _tags, ...noTags } = validEntry;
     const result = decomposeResponseSchema.parse({ entries: [noTags] });
     expect(result.entries[0]!.tags).toEqual([]);
   });

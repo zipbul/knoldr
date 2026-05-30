@@ -1,4 +1,4 @@
-// neighbors A2A skill — n-hop walk over the entity KG.
+// neighbors MCP tool — n-hop walk over the entity KG.
 //
 // Lookup is by entity name (case-insensitive) or by entity ULID.
 // Returns the connected entities up to `hops` away, optionally

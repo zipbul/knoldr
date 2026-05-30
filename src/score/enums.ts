@@ -5,7 +5,7 @@
 //   - PascalCase keys make enum access readable in TS
 //     (Verdict.NotApplicable vs "not_applicable")
 //   - kebab-case values are URL-/CLI-/JSON-friendly and play nicely
-//     across language boundaries (Python finetune, A2A JSON-RPC)
+//     across language boundaries (Python finetune, MCP JSON-RPC)
 //   - One file = one place to verify when a new value is added
 //     anywhere in the system (DB CHECK, prompt, API doc, etc.)
 //

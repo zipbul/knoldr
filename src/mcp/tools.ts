@@ -10,6 +10,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { logger } from '../observability/logger';
+import { ANONYMOUS_AGENT } from './auth';
 import { handleClaimFeedback, claimFeedbackInputShape } from './handlers/claim-feedback';
 import { handleContradictions, contradictionsInputShape } from './handlers/contradictions';
 import { handleFeedback, feedbackInputShape } from './handlers/feedback';
@@ -46,7 +47,7 @@ async function guard(tool: string, run: () => Promise<unknown>): Promise<CallToo
  * /mcp boundary (resolved from the bearer token). Used to attribute
  * feedback/claim_feedback to the real caller, never a self-asserted id. */
 function callerAgent(extra: { authInfo?: { clientId?: string } }): string {
-  return extra.authInfo?.clientId ?? 'anonymous';
+  return extra.authInfo?.clientId ?? ANONYMOUS_AGENT;
 }
 
 const FIND_DESC = `Search stored knowledge. If results are insufficient, automatically crawls the web to collect new data, then re-searches.

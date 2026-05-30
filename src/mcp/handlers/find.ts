@@ -4,10 +4,10 @@ import type { SearchResult } from '../../search/search';
 
 import { fetchClaimsForEntries, fetchFactBundlesForEntries, fetchFactualityForEntries } from '../../claim/query';
 import { research } from '../../collect/research';
+import { NOOP_PROGRESS, type Progress } from '../../lib/progress';
 import { logger } from '../../observability/logger';
 import { SortBy, TrustLevel } from '../../score/enums';
 import { search, explore } from '../../search/search';
-import { NOOP_PROGRESS, type Progress } from '../progress';
 
 const findInputShape = {
   query: z.string().min(1).max(1000).optional(),

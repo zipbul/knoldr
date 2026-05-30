@@ -1,4 +1,4 @@
-// claim_feedback A2A skill — claim-level structured feedback (v0.4).
+// claim_feedback MCP tool — claim-level structured feedback (v0.4).
 //
 // Distinct from the entry-level `feedback` skill. This one targets a
 // specific claim (by ULID) and accepts the v0.4 structured shape:

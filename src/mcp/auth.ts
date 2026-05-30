@@ -1,5 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 
+import { isLoopbackHost, resolveHost } from './net';
+
 const ANONYMOUS_AGENT = 'anonymous';
 
 /**
@@ -76,10 +78,6 @@ function authenticate(request: Request): string | null {
   return null;
 }
 
-function isLoopbackHost(host: string): boolean {
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '::ffff:127.0.0.1';
-}
-
 /**
  * Call from server startup. Refuses to start when the listener would be
  * both reachable and unauthenticated:
@@ -97,7 +95,7 @@ function requireTokenOrThrow(): void {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('KNOLDR_API_TOKEN is required in production (fail-closed auth policy)');
   }
-  const host = process.env.KNOLDR_HOST ?? '127.0.0.1';
+  const host = resolveHost();
   if (!isLoopbackHost(host)) {
     throw new Error(`KNOLDR_API_TOKEN is required when binding a non-loopback host (KNOLDR_HOST=${host})`);
   }
@@ -119,4 +117,4 @@ function constantTimeEqual(a: string, b: string): boolean {
   return eq && aBuf.length === bBuf.length;
 }
 
-export { authenticate, requireTokenOrThrow };
+export { authenticate, requireTokenOrThrow, ANONYMOUS_AGENT };

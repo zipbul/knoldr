@@ -1,33 +1,18 @@
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 
-/**
- * Progress reporter threaded through long-running skills (currently
- * only `find`'s auto-research, which also drives `collect/research`).
- *
- * Relocated here from the deleted A2A transport layer so handler
- * modules and collectors can import the type without dragging in the
- * server. The MCP bridge below turns each `emit()` into an MCP
- * `notifications/progress` over the Streamable HTTP SSE channel — but
- * only when the caller opted in with a `_meta.progressToken`.
- */
-interface Progress {
-  emit(stage: string, data?: Record<string, unknown>): void;
-}
-
-/** Used when no client progress token is present — identical to the old non-streaming path. */
-const NOOP_PROGRESS: Progress = { emit: () => {} };
+import { NOOP_PROGRESS, type Progress } from '../lib/progress';
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 /**
- * Build a Progress that streams MCP progress notifications for one
- * tool call. No-ops when the client didn't supply a progressToken, so
+ * Build a Progress that streams MCP progress notifications for one tool
+ * call. No-ops when the client didn't supply a progressToken, so
  * non-streaming callers behave exactly as before. The open Streamable
  * HTTP stream carries the notifications back to the client; we never
  * manage keepalives ourselves (the transport owns the SSE channel).
  */
-function makeMcpProgress(extra: ToolExtra): Progress {
+export function makeMcpProgress(extra: ToolExtra): Progress {
   const token = extra._meta?.progressToken;
   if (token === undefined) {
     return NOOP_PROGRESS;
@@ -58,6 +43,3 @@ function makeMcpProgress(extra: ToolExtra): Progress {
     },
   };
 }
-
-export { NOOP_PROGRESS, makeMcpProgress };
-export type { Progress };

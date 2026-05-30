@@ -1,5 +1,5 @@
 // Single source of truth for the claim_feedback evidence strength
-// heuristic. Both the A2A `claim_feedback` handler (insert + update
+// heuristic. Both the `claim_feedback` MCP tool handler (insert + update
 // paths) and the FQA background enrichment call this — the previous
 // duplicated copies could drift if either side was tweaked alone.
 //

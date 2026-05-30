@@ -1,4 +1,4 @@
-// contradictions A2A skill — surface CONTRADICTS edges.
+// contradictions MCP tool — surface CONTRADICTS edges.
 //
 // Two query modes:
 //   - { claimId } : claims directly contradicting this one (1-hop)

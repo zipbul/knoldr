@@ -1,4 +1,4 @@
-// provenance A2A skill — walk DERIVES_FROM edges back to the roots.
+// provenance MCP tool — walk DERIVES_FROM edges back to the roots.
 //
 // Given a claim ID, returns every ancestor reachable via the
 // `derives_from` claim_relation edges, plus each ancestor's

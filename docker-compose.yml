@@ -32,7 +32,6 @@ services:
       # app refuse to start rather than serve unauthenticated. Set it in .env.
       NODE_ENV: '${NODE_ENV:-production}'
       KNOLDR_API_TOKEN: '${KNOLDR_API_TOKEN:-}'
-      LANGSEARCH_API_KEY: '${LANGSEARCH_API_KEY:-}'
       # Local Ollama on the host. host.docker.internal maps to the
       # WSL host gateway via extra_hosts below — Linux Docker doesn't
       # resolve it automatically the way Docker Desktop does.
@@ -54,9 +53,6 @@ services:
       OPENBLAS_NUM_THREADS: '${OPENBLAS_NUM_THREADS:-4}'
       MKL_NUM_THREADS: '${MKL_NUM_THREADS:-4}'
       ORT_INTRA_OP_NUM_THREADS: '${ORT_INTRA_OP_NUM_THREADS:-4}'
-      # Self-hosted SearXNG meta-search for web_search fallback when
-      # an entry has no usable cited sources.
-      SEARXNG_URL: '${SEARXNG_URL:-http://searxng:8080}'
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     depends_on:
@@ -135,24 +131,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
-  # SearXNG meta-search: aggregates Google, Bing, DuckDuckGo, Wikipedia,
-  # GitHub, arXiv etc. Self-hosted so we get unmetered queries and can
-  # tune engine selection per claim type. JSON API enabled via baked-in
-  # settings.yml (Docker Desktop on WSL has issues with bind-mounting
-  # to /etc/searxng, so we COPY the config into the image instead).
-  searxng:
-    build:
-      context: .
-      dockerfile: Dockerfile.searxng
-    environment:
-      BASE_URL: 'http://searxng:8080/'
-      INSTANCE_NAME: 'knoldr-searxng'
-    cap_add:
-      - CHOWN
-      - SETGID
-      - SETUID
-    restart: unless-stopped
 
 volumes:
   knoldr-data:

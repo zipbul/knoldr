@@ -204,5 +204,16 @@ async function nliScore(premise: string, hypothesis: string): Promise<NliScores>
   return maxClass(secondary) > maxClass(primary) ? secondary : primary;
 }
 
-export { nliScore };
+/**
+ * Local-only NLI: exactly one ONNX forward, never escalating to the
+ * Ollama translate fallback. Used for claim-pair edge classification
+ * where up to 20 pairs run per verify commit — an LLM round-trip per
+ * hedging pair (nliScore's fallback) would be up to 20 Ollama calls
+ * per claim.
+ */
+async function nliScoreLocal(premise: string, hypothesis: string): Promise<NliScores> {
+  return rawNliScore(premise, hypothesis, pickModel(hypothesis));
+}
+
+export { nliScore, nliScoreLocal };
 export type { NliScores };

@@ -55,6 +55,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Strict grounding: Verified requires >=1 successful cited-source
+  // grounding — a row labelled 'verified' with no sourceUrls is
+  // permanently unwinnable and would silently drag F1 down forever.
+  const unwinnable = items.filter(i => i.expectedVerdict === Verdict.Verified && (!i.sourceUrls || i.sourceUrls.length === 0));
+  if (unwinnable.length > 0) {
+    console.error(`rows labelled 'verified' MUST carry sourceUrls (strict grounding): ${unwinnable.map(i => i.id).join(', ')}`);
+    process.exit(1);
+  }
+
   const db = getDb();
   await db.transaction(async tx => {
     for (const it of items) {

@@ -222,12 +222,11 @@ async function fetchFactBundlesForEntries(
 
   const claimIds = primaryClaims.map(c => c.id);
 
-  // 1-hop edges — outgoing (this claim → other) AND incoming for
-  // CONTRADICTS / REFINES / SUPERSEDED_BY where the dispute /
-  // refinement is conceptually symmetric. Without the incoming fetch,
-  // a verified claim X disputed by a later claim Y would never
-  // surface the conflict — the edge is Y→X and X's outgoing-only
-  // query misses it.
+  // 1-hop edges — outgoing (this claim → other) plus incoming for
+  // CONTRADICTS and SUPPORTS (see the incoming fetch below). Without
+  // the incoming fetch, a verified claim X disputed by a later claim Y
+  // (edge Y→X) or supported by neighbor N (edge N→X) would never
+  // surface either relation.
   const outgoingEdges = await getDb()
     .select({
       pivot: claimRelation.sourceClaimId,
@@ -240,14 +239,13 @@ async function fetchFactBundlesForEntries(
     .where(inArray(claimRelation.sourceClaimId, claimIds))
     .orderBy(desc(claimRelation.weight), desc(claimRelation.createdAt));
 
-  // Only CONTRADICTS is direction-symmetric — both endpoints
-  // "contradict each other" with equal meaning. REFINES and
-  // SUPERSEDED_BY are directional: A--refines-->B means A is the
-  // refinement of B, so the buckets `refines` and `supersededBy`
-  // only make sense from the outgoing side. Surfacing the inverse
-  // semantics ("what refines this?" / "what supersedes this?")
-  // would need separate buckets; for now incoming-only fetch is
-  // scoped to contradicts to avoid reversing the meaning.
+  // Incoming fetch covers CONTRADICTS (direction-symmetric — both
+  // endpoints dispute each other) and SUPPORTS (directional the OTHER
+  // way: edges are written neighbor→claim, "the neighbor supports this
+  // claim", so a claim's supporters arrive as INCOMING rows). REFINES
+  // and SUPERSEDED_BY stay outgoing-only: A--refines-->B means A is
+  // the refinement of B, so surfacing the inverse would reverse the
+  // meaning.
   const incomingEdges = await getDb()
     .select({
       pivot: claimRelation.targetClaimId,
@@ -257,7 +255,7 @@ async function fetchFactBundlesForEntries(
       direction: sql<'in'>`'in'`.as('direction'),
     })
     .from(claimRelation)
-    .where(and(inArray(claimRelation.targetClaimId, claimIds), eq(claimRelation.relationType, 'contradicts')))
+    .where(and(inArray(claimRelation.targetClaimId, claimIds), inArray(claimRelation.relationType, ['contradicts', 'supports'])))
     .orderBy(desc(claimRelation.weight), desc(claimRelation.createdAt));
 
   const edges = [...outgoingEdges, ...incomingEdges];
@@ -318,7 +316,11 @@ async function fetchFactBundlesForEntries(
     };
     switch (e.type as RelationType) {
       case RelationType.Supports:
-        if (b.supports.length < maxEdges) {
+        // SUPPORTS is INCOMING-only in the bundle: edges are written
+        // neighbor→claim, so an outgoing supports row on this pivot
+        // means this claim supports someone ELSE — surfacing it here
+        // would invert the meaning (and double-list the edge).
+        if (e.direction === 'in' && b.supports.length < maxEdges) {
           b.supports.push(link);
         }
         break;

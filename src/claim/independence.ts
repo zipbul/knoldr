@@ -6,7 +6,7 @@
 // We deduplicate at three layers:
 //
 // 1. Domain — different reg-domain, different publisher (already
-//    enforced when web-search assembles candidates).
+//    enforced when cited-source urls are assembled).
 // 2. Title — different titles after normalization (catches Medium
 //    cross-posts of the exact same article).
 // 3. Content simhash — same body text under different titles

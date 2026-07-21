@@ -1,12 +1,21 @@
 # Plan v8: knoldr restructure — pure verified warehouse, ZERO external search services
+
 # r1: Codex(6)/Grok(10)/Fable(6) → v2. r2: Codex(1)/Grok(4)/Fable(4) → v3.
+
 # r3: Fable EMPTY, Codex(3), Grok(5) → v4. r4: Codex(3)/Grok(5)/Fable(4) → v5.
+
 # r5: Grok approve(EMPTY); Codex(2) + Fable(3) → v6 (SUPPORTS direction,
+
 # per-target weights, KG-vs-crossref merge, weight/direction tests).
+
 # r6: Codex EMPTY (after test-block fix), Grok(1) + Fable(4) → v7 (read-path
+
 # fix, direction option, legacy-supports migration — premise verified sound in
+
 # r7: the promotion branch is the ONLY supports writer). r7: Codex EMPTY,
+
 # Grok EMPTY, Fable(1) → this v8: SUPPORTS is INCOMING-ONLY in factBundle
+
 # bucketing (prevents the inverted duplicate on the neighbor's bundle).
 
 ## Decision (owner-made)
@@ -20,6 +29,7 @@ knoldr: receive → extract claims → verify (grounding) → KG → find (insta
 ```
 
 "External search SERVICES" ≠ "fetching cited sources":
+
 - REMOVED: LangSearch acquisition, SearXNG web/counter search, GitHub/arXiv
   retrieval, find's auto-research.
 - KEPT: SSRF-guarded live-fetch of the ingester's cited URLs (source-fetch) +
@@ -73,6 +83,7 @@ CoVe (same cited URLs) → finalize (sourceless: no-cited-sources / cited:
 retry→exhausted)` — no counter-search, no specialized retrieval, no SearXNG.
 
 ### Implementer contract (verify.ts — exact wiring, r2/r3)
+
 1. Delete the early Verified return (:151-165) and the now-dead
    `CROSS_REF_MIN_CORROBORATIONS` constant (:75).
 2. **Edge emission is NLI-CLASSIFIED, LOCAL-ONLY, DIRECTIONAL (r3 Codex +
@@ -92,7 +103,7 @@ retry→exhausted)` — no counter-search, no specialized retrieval, no SearXNG.
      Ollama. Honest cost bound: ≤20 candidates × 1-2 local ONNX forwards, only
      on claims that reach a non-null commit.
    - entailment ≥ support threshold → SUPPORTS candidate `{ id, score:
-     entailment }`; contradiction ≥ refute threshold → CONTRADICTS candidate
+entailment }`; contradiction ≥ refute threshold → CONTRADICTS candidate
      `{ id, score: contradiction }`; otherwise NO edge. Thresholds =
      getCurrentThresholds() (calibration reuse; threshold fit for claim-pairs
      is a deferrable tuning concern — edges carry no verdict effect).
@@ -106,7 +117,7 @@ retry→exhausted)` — no counter-search, no specialized retrieval, no SearXNG.
    contradictions (exactly where SUPPORTS would die); never touches
    verdict/certainty. The sourceless result flows through the same helper:
    `return await withCrossRef({ verdict: Unverified, certainty: 0,
-   evidence: { source: EvidenceSource.NoCitedSources, rationale: 'no cited sources' } })`.
+evidence: { source: EvidenceSource.NoCitedSources, rationale: 'no cited sources' } })`.
 4. **Edge WEIGHT + DIRECTION + writer mechanics (r4 + r5 Codex/Fable)**:
    - The committer today writes `weight: result.certainty` (:835,:842) — claim
      verdict, not relationship strength; sourceless certainty 0 would mint
@@ -135,7 +146,7 @@ retry→exhausted)` — no counter-search, no specialized retrieval, no SearXNG.
    - **writeClaimEdges signature change** (relation-writer.ts:22-33 accepts ONE
      weight per call today): extend to per-target weights AND direction —
      `writeClaimEdges(pivotId, others: Array<{id, weight}>, type,
-     { direction: 'outgoing' | 'incoming', ...opts })`. `outgoing` builds rows
+{ direction: 'outgoing' | 'incoming', ...opts })`. `outgoing` builds rows
      (pivot→other) as today; **`incoming` builds (other→pivot)** — required
      because flipped SUPPORTS is many-sources→one-target, which the
      one-source→many-targets shape cannot express (r6 Fable). One call per
@@ -161,6 +172,7 @@ retry→exhausted)` — no counter-search, no specialized retrieval, no SearXNG.
 ## Changes
 
 ### 1. find — pure instant DB search (contract-breaking, intentional)
+
 - Delete the search→research→re-search flow (find.ts); single stored search.
 - **REMOVE `researched` and `research` from the response shape entirely**
   (not always-false — remove for honesty). Update agent-card: top-level
@@ -173,6 +185,7 @@ retry→exhausted)` — no counter-search, no specialized retrieval, no SearXNG.
   later for verified facts."
 
 ### 2. verify.ts surgery
+
 - Delete imports/stages: web-search (:32), specialized-retrieval (:30),
   counter-search (:18); the verified-path counter-search guard (~213-226); the
   external-retrieval stage (~242-267).
@@ -182,13 +195,14 @@ retry→exhausted)` — no counter-search, no specialized retrieval, no SearXNG.
 - CoVe stays (verified web-free: cove.ts imports only llm/cli + logger).
 
 ### 3. Deletions (import-graph closed, per review)
+
 - Modules + their tests: collect/{research,query-decompose,search-scraper},
   claim/{web-search,counter-search,specialized-retrieval},
   tests/unit/{research-helpers,query-decompose}.test.ts.
 - **text-split: goes with research** (the v1 claim "used by ingest" was FALSE —
   research.ts is its only consumer; delete + its test unless tsc/knip reveal
   another importer at implementation time).
-- **scripts/probe-langsearch.ts — explicit** (knip-blind: scripts/*.ts are knip
+- **scripts/probe-langsearch.ts — explicit** (knip-blind: scripts/\*.ts are knip
   entries).
 - **searxng/ config dir + Dockerfile.searxng + compose searxng service + app
   env SEARXNG_URL** (compose ~:54).
@@ -198,12 +212,14 @@ retry→exhausted)` — no counter-search, no specialized retrieval, no SearXNG.
   (r2 all three). KEEP KNOLDR_ALLOWED_INTERNAL_HOSTS (source-fetch SSRF).
 
 ### 4. feedback-router — Outdated semantics redefined
+
 The documented "follow-up worker triggers fresh LangSearch re-research" can
 never exist now. Outdated → metadata stamp + re-queue claims for verification
 against their CITED sources only (existing reverifyEntryClaims). Update
 comments (:27,81,90) and any docs.
 
 ### 5. Stale-comment/doc sweep (explicit list)
+
 verify.ts:84-96 (strategy docstring still documents cross-ref promotion + the
 removed jury), verify.ts:455 ("fall through to CoVe / web search"),
 verify.ts:761 ("SearXNG"), ingest/engine.ts:94 (stale research.ts reference),
@@ -218,6 +234,7 @@ eval/README.md:25 (stage list includes "web search"), FUTURE.md:7 (inlet
 language), finetune header, text-split references.
 
 ### 6. Workers
+
 All remaining workers stay (claim-extract, verify, kg-extract, reclassify,
 retry, dedup, partition, calibration, drift, invariants, smoke-eval). Drift
 re-verification re-fetches cited sources — still valuable. classify-batch +
@@ -225,11 +242,13 @@ reclassify-queue kept (classify stored entries, no web). batch-dedup,
 retry-runner kept (no web).
 
 ## What this supersedes
+
 The find-latency plan v7 in its entirety: research_log, admission SQL, owner
 tokens, generation slots, watchdogs, rate caps, researchQueued — all dead. The
 instant-find goal is achieved by deletion.
 
 ## Tests
+
 - Update: a2a.test.ts:182,192 (asserted `researched` — field no longer exists).
 - New: find cold-miss → instant, response has NO researched/research fields, no
   research side-effects/network; verify sourceless → single-pass finalize
@@ -260,12 +279,14 @@ instant-find goal is achieved by deletion.
   remains network-dependent; only web-SEARCH variance disappears.
 
 ## Verification gate (not just knip)
+
 tsc --noEmit, full unit+integration suites, `docker compose config` validation,
 repo-wide grep for LANGSEARCH/SEARXNG/researched/auto-research terminology,
-knip (with the caveat that scripts/* are entries — probe-langsearch is deleted
+knip (with the caveat that scripts/\* are entries — probe-langsearch is deleted
 explicitly, not via knip).
 
 ## Rollout
+
 One PR, base current main; coordinate with #37 (MCP) — whichever lands second
 rebases (file moves only).
 Migration: no schema change, but ONE data migration (r6 Fable): DELETE all
@@ -281,6 +302,7 @@ Legacy CONTRADICTS rows mix KG-conflict (sound) and cross-ref similarity
 documented as accepted legacy imperfection.
 
 ## Residual risks (accepted, documented honestly)
+
 - **Counter-search demotion is lost**: previously a Verified claim could be
   demoted by adversarial web search; now nothing external brakes a
   cherry-picked-but-internally-consistent source. Mitigations that remain:

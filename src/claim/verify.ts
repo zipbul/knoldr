@@ -7,7 +7,7 @@ import { checkKgContradiction, type KgContradiction } from '../kg/contradiction'
 import { expandWithKgFacts } from '../kg/expand';
 import { bespokeCheck } from '../llm/bespoke-check';
 import { qaVerify } from '../llm/docqa';
-import { nliScore, type NliScores } from '../llm/nli';
+import { nliScore, nliScoreLocal, type NliScores } from '../llm/nli';
 import { logger } from '../observability/logger';
 import { verifyVerdicts, verifyErrors, verifyStageLatency } from '../observability/metrics';
 import { ClaimType, EntryScoreDimension, EvidenceSource, RelationType, Verdict, VerdictTrigger } from '../score/enums';
@@ -15,7 +15,6 @@ import { aggregate, type SourceEvidence } from './aggregator';
 import { authorityFor } from './authority';
 import { recordVerdictTransitionSafe } from './authority-learn';
 import { getCurrentThresholds } from './calibration';
-import { counterSearch } from './counter-search';
 import { decomposeClaim } from './cove';
 import { fingerprint, type SourceFingerprint } from './independence';
 import { hasNegation, NEGATION_DAMPING } from './negation';
@@ -27,9 +26,7 @@ import { hasNegation, NEGATION_DAMPING } from './negation';
 import { numericContradicts } from './numeric';
 import { writeClaimEdges } from './relation-writer';
 import { fetchSource, selectRelevantChunks, type FetchedSource } from './source-fetch';
-import { getSpecializedHits } from './specialized-retrieval';
 import { extractClaimYear, isSourceTooOld } from './time-aware';
-import { webSearch } from './web-search';
 
 interface SourceCheckResult {
   url: string;
@@ -62,37 +59,47 @@ interface VerifyResult {
     kgConflict?: KgContradiction;
     subClaims?: SubClaimResult[];
     votes?: Array<{ cli: string; verdict: Verdict; certainty: number }>;
-    // claim_relation edge targets discovered during verify. The
-    // queue committer writes CONTRADICTS / SUPPORTS rows from
-    // these AFTER the verdict commits, so any FK miss can't roll
-    // back the commit itself.
-    contradictingClaimIds?: string[];
-    corroboratingClaimIds?: string[];
+    // claim_relation edge targets discovered during verify, SCORED:
+    // cross-ref edges carry the classifying NLI probability, KG-conflict
+    // edges carry kgConflict.confidence. The queue committer writes
+    // CONTRADICTS / SUPPORTS rows from these AFTER the verdict commits,
+    // so any FK miss can't roll back the commit itself.
+    contradicting?: ScoredEdgeTarget[];
+    corroborating?: ScoredEdgeTarget[];
   };
 }
 
+interface ScoredEdgeTarget {
+  id: string;
+  score: number;
+}
+
 const SIMILARITY_THRESHOLD = 0.8;
-const CROSS_REF_MIN_CORROBORATIONS = 3;
 
 // NLI thresholds. Default 0.7 (conventional FEVER cutoff) but the
 // auto-calibration worker overrides these in `calibration_state`
-// based on observed agreement between source_check + KG + jury.
+// based on observed agreement between source_check + KG signals.
 // `getCurrentThresholds()` is cached per minute so the cost is one
 // DB read per verify batch.
 const SOURCE_CHECK_MAX_URLS = 5;
 
 /**
- * Verify a single factual claim.
+ * Verify a single factual claim — STRICT GROUNDING.
  *
- * Strategy (follows DESIGN.md v0.3 verification flow with simplified
- * tooling — no live Pyreez deliberation yet):
- *   1. db_cross_ref: find similar verified claims via embedding cosine
- *      distance.  >= MIN corroborations and no contradictions →
- *      verified (medium certainty).
- *   2. LLM judgment: use the multi-CLI fallback layer to adjudicate the
- *      claim using the Entry's sources as context.  Single call today;
- *      swap for Pyreez's real multi-model deliberation once the package
- *      is wired in directly (see DESIGN.md:231 "Pyreez 검증 도구").
+ * `Verified` ⇔ at least one successful cited-live-source grounding
+ * (source_check NLI pass, possibly via CoVe sub-claims over the same
+ * cited URLs) AND no KG functional-predicate conflict. Stage order:
+ *   1. db_cross_ref: embedding neighbors supply CANDIDATES for
+ *      NLI-classified SUPPORTS/CONTRADICTS edge emission only — it
+ *      never produces or demotes a verdict.
+ *   2. KG contradiction: content-precise short-circuit → Disputed.
+ *      The one and only internal-contradiction veto.
+ *   3. source_check over the ingester's CITED urls (± DocQA/Bespoke
+ *      escalation), then CoVe over the same urls when inconclusive.
+ *   4. Sourceless claims finalize in a single pass (no-cited-sources):
+ *      nothing can ever verify a claim with no cited sources.
+ * knoldr uses NO external search services — verification evidence is
+ * the cited sources themselves (citation checking, not web search).
  */
 async function verifyClaim(claimId: string): Promise<VerifyResult | null> {
   const result = await verifyClaimInner(claimId);
@@ -116,75 +123,95 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
   }
 
   const crossRefTimer = verifyStageLatency.startTimer({ stage: EvidenceSource.DbCrossRef });
-  const crossRef = await dbCrossRef(claimId, row.entryId, row.embedding);
+  const candidates = await dbCrossRef(claimId, row.entryId, row.embedding);
   crossRefTimer();
 
-  // Post-processing hook: every return below funnels through
-  // `withCrossRef` so cross-ref contradictions land in the eventual
-  // evidence regardless of which stage decided the verdict.
-  //
-  // Cross-ref contradictions are an independent signal from the KG
-  // ones a verdict stage may have already attached — KG fires on
-  // functional-predicate triple conflicts, cross-ref fires on
-  // semantic-embedding neighbors. Both should land as CONTRADICTS
-  // edges, so we *merge + dedupe* rather than skip when the result
-  // already carries some.
+  // Post-processing hook: every non-null return below funnels through
+  // `withCrossRef`, which NLI-CLASSIFIES the embedding-neighbor
+  // candidates into scored SUPPORTS/CONTRADICTS edge targets and merges
+  // them into the evidence. Edge emission ONLY — cross-ref never
+  // produces, demotes, or boosts a verdict: embedding similarity plus a
+  // neighbor's verdict is not a contradiction signal (negations embed
+  // as similar; a Disputed neighbor means "a similar claim is
+  // contested"), and letting it veto would false-demote and start a
+  // transitive Disputed contagion. Classification uses the LOCAL-only
+  // NLI path (no Ollama translate fallback): ≤20 candidates × 1 ONNX
+  // forward, direction premise=neighbor / hypothesis=claim ("does the
+  // neighbor support this claim"). KG-conflict entries already present
+  // in the evidence win dedupe over cross-ref entries (content-precise
+  // beats similarity+NLI).
   const MAX_CONTRADICT_EDGES = 8;
-  const withCrossRef = (r: VerifyResult | null): VerifyResult | null => {
+  const MAX_SUPPORT_EDGES = 5;
+  const withCrossRef = async (r: VerifyResult | null): Promise<VerifyResult | null> => {
     if (!r) {
       return null;
     }
-    if (crossRef.contradictingIds.length === 0) {
+    if (candidates.length === 0) {
       return r;
     }
-    const existing = r.evidence.contradictingClaimIds ?? [];
-    const merged = Array.from(new Set([...existing, ...crossRef.contradictingIds])).slice(0, MAX_CONTRADICT_EDGES);
+    const thresholds = await getCurrentThresholds();
+    const corroborating: ScoredEdgeTarget[] = [];
+    const contradicting: ScoredEdgeTarget[] = [];
+    for (const cand of candidates) {
+      try {
+        const s = await nliScoreLocal(cand.statement, row.statement);
+        if (s.contradiction >= thresholds.refute) {
+          contradicting.push({ id: cand.id, score: s.contradiction });
+        } else if (s.entailment >= thresholds.support) {
+          corroborating.push({ id: cand.id, score: s.entailment });
+        }
+      } catch (err) {
+        logger.debug({ candidateId: cand.id, error: (err as Error).message }, 'edge NLI classification failed — no edge');
+      }
+    }
+    // KG-wins dedupe: entries the verdict stage already attached
+    // (KG-conflict ids scored with kgConflict.confidence) take
+    // precedence over cross-ref classifications of the same neighbor.
+    const mergeKgFirst = (kg: ScoredEdgeTarget[] | undefined, cross: ScoredEdgeTarget[], cap: number): ScoredEdgeTarget[] => {
+      const out = [...(kg ?? [])];
+      const have = new Set(out.map(t => t.id));
+      for (const t of cross) {
+        if (!have.has(t.id)) {
+          out.push(t);
+          have.add(t.id);
+        }
+      }
+      return out.slice(0, cap);
+    };
     return {
       ...r,
       evidence: {
         ...r.evidence,
-        contradictingClaimIds: merged,
+        contradicting: mergeKgFirst(r.evidence.contradicting, contradicting, MAX_CONTRADICT_EDGES),
+        corroborating: mergeKgFirst(r.evidence.corroborating, corroborating, MAX_SUPPORT_EDGES),
       },
     };
   };
-
-  if (crossRef.corroborations >= CROSS_REF_MIN_CORROBORATIONS && crossRef.contradictions === 0) {
-    return withCrossRef({
-      verdict: Verdict.Verified,
-      certainty: 0.6,
-      evidence: {
-        source: EvidenceSource.DbCrossRef,
-        corroborations: crossRef.corroborations,
-        contradictions: crossRef.contradictions,
-        // Cap to 5 SUPPORTS edges per claim so high-corroboration
-        // claims don't explode the graph; the top-5 by similarity
-        // already came back ordered.
-        corroboratingClaimIds: crossRef.corroboratingIds.slice(0, 5),
-      },
-    });
-  }
 
   // KG contradiction check: extract triples from the claim, see if a
   // verified claim ever asserted (subject, predicate, *different
   // object*) for a functional relation. Catches lexical traps the
   // NLI model misses (e.g. "Bun runs on V8" against KG saying
   // "Bun runs_on JSCore"). Free signal — costs one LLM extraction
-  // call but skips both source fetch and jury when it fires.
+  // call but skips the source fetch entirely when it fires.
   const kgTimer = verifyStageLatency.startTimer({ stage: EvidenceSource.KgContradiction });
   const kgConflict = await checkKgContradiction(row.statement);
   kgTimer();
   if (kgConflict && kgConflict.confidence >= 0.7) {
     // Flatten every supporting claim id across all conflicting
-    // objects into CONTRADICTS targets. Cap at 10 per claim so a
-    // popular subject doesn't write a hundred edges per detection.
-    const contradictingClaimIds = Array.from(new Set(kgConflict.conflictingObjects.flatMap(co => co.claimIds))).slice(0, 10);
-    return withCrossRef({
+    // objects into CONTRADICTS targets, scored with the conflict
+    // confidence. Cap at 10 per claim so a popular subject doesn't
+    // write a hundred edges per detection.
+    const contradicting = Array.from(new Set(kgConflict.conflictingObjects.flatMap(co => co.claimIds)))
+      .slice(0, 10)
+      .map(id => ({ id, score: kgConflict.confidence }));
+    return await withCrossRef({
       verdict: Verdict.Disputed,
       certainty: kgConflict.confidence,
       evidence: {
         source: EvidenceSource.KgContradiction,
         kgConflict,
-        contradictingClaimIds,
+        contradicting,
       },
     });
   }
@@ -196,83 +223,46 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
 
   const sourceUrls = sources.map(s => s.url).slice(0, SOURCE_CHECK_MAX_URLS);
 
-  // Source-grounded NLI: fetch each entry source, run DeBERTa-FEVER on
-  // the most relevant window. This is the strongest signal available —
-  // calibrated entailment probability against the actual cited source,
-  // not the LLM's prior knowledge.
-  if (sourceUrls.length > 0) {
-    const sourceTimer = verifyStageLatency.startTimer({ stage: EvidenceSource.SourceCheck });
-    const sourceCheck = await runSourceCheck(row.statement, sourceUrls);
-    sourceTimer();
-    if (sourceCheck) {
-      // Counter-search guard: when a verified verdict comes back,
-      // try to refute it once before committing. Echo-chamber
-      // sources are real (especially for tech blog cargo-cult
-      // claims) and a single authoritative contradiction here
-      // saves a false positive in production.
-      if (sourceCheck.verdict === Verdict.Verified) {
-        const counter = await counterSearch(row.statement);
-        if (counter?.triggered) {
-          return withCrossRef({
-            verdict: Verdict.Disputed,
-            certainty: counter.contradiction,
-            evidence: {
-              ...sourceCheck.evidence,
-              source: EvidenceSource.SourceCheck,
-              rationale: `counter-search refuted at ${counter.url} (contradiction=${counter.contradiction.toFixed(2)})`,
-            },
-          });
-        }
-      }
-      return withCrossRef(sourceCheck);
-    }
-
-    // Source check inconclusive (every chunk neutral or below
-    // threshold). Try CoVe: decompose the claim into atomic sub-
-    // claims and verify each separately. Lexical traps that fool the
-    // monolithic NLI pass usually break apart into one component
-    // that clearly fails — e.g. "Bun runs on V8" splits into "Bun
-    // is a JS runtime" (entailed) and "Bun's engine is V8" (refuted).
-    const cove = await runCoveVerification(row.statement, sourceUrls);
-    if (cove) {
-      return withCrossRef(cove);
-    }
+  // Sourceless claims finalize in a single pass: under strict grounding
+  // nothing can ever verify a claim with no cited sources, so retrying
+  // is pure waste. The concrete result (never null — null means retry)
+  // flows through the normal commit path; re-ingestion with sources
+  // creates new claims anyway.
+  if (sourceUrls.length === 0) {
+    return await withCrossRef({
+      verdict: Verdict.Unverified,
+      certainty: 0,
+      evidence: { source: EvidenceSource.NoCitedSources, rationale: 'no cited sources' },
+    });
   }
 
-  // No usable cited sources (or all inconclusive). Pull external
-  // evidence: specialized retrieval (GitHub for code claims, arXiv
-  // for research claims) plus SearXNG meta-search. Specialized hits
-  // come first because they're directly authoritative on their
-  // domain — a GitHub README beats a Medium summary of the same
-  // library every time.
-  const specialized = await getSpecializedHits(row.statement);
-  const web = await webSearch(row.statement);
-  // Wider candidate pool than entry-source path: external retrieval
-  // is noisier per-source (random web pages vs cited sources), so
-  // we accept more candidates to give the Bayesian aggregator
-  // enough independent groups to overcome individual misses.
-  const externalUrls = [...specialized, ...web]
-    .map(r => r.url)
-    .filter((u, i, arr) => arr.indexOf(u) === i)
-    .slice(0, 8);
-  if (externalUrls.length > 0) {
-    const webCheck = await runSourceCheck(row.statement, externalUrls);
-    if (webCheck) {
-      return withCrossRef(webCheck);
-    }
-    const webCove = await runCoveVerification(row.statement, externalUrls);
-    if (webCove) {
-      return withCrossRef(webCove);
-    }
+  // Source-grounded NLI: fetch each CITED source, run DeBERTa-FEVER on
+  // the most relevant window. This is the verification backbone —
+  // calibrated entailment probability against the actual cited source
+  // (citation checking, not web search), not the LLM's prior knowledge.
+  const sourceTimer = verifyStageLatency.startTimer({ stage: EvidenceSource.SourceCheck });
+  const sourceCheck = await runSourceCheck(row.statement, sourceUrls);
+  sourceTimer();
+  if (sourceCheck) {
+    return await withCrossRef(sourceCheck);
   }
 
-  // No conclusive evidence found anywhere. Return null so caller
-  // marks the claim unverified rather than fabricating a verdict from
-  // model priors. Previous version invoked an LLM jury here; benchmarks
-  // (LLM-AggreFact, MiniCheck Tang 2024) show single-model jury votes
-  // add no measurable BAcc over source-grounded NLI, and the Promise
-  // jury did not fit the 16GB VRAM budget alongside a resident
-  // grounder — every call paid a model-swap cold start.
+  // Source check inconclusive (every chunk neutral or below
+  // threshold). Try CoVe: decompose the claim into atomic sub-
+  // claims and verify each separately against the same cited urls.
+  // Lexical traps that fool the monolithic NLI pass usually break
+  // apart into one component that clearly fails — e.g. "Bun runs on
+  // V8" splits into "Bun is a JS runtime" (entailed) and "Bun's
+  // engine is V8" (refuted).
+  const cove = await runCoveVerification(row.statement, sourceUrls);
+  if (cove) {
+    return await withCrossRef(cove);
+  }
+
+  // Cited sources exist but every check was inconclusive. Return null
+  // so the caller retries with backoff (sources may be transiently
+  // unfetchable) and finalizes ExhaustedPipeline unverified after the
+  // third attempt.
   return null;
 }
 
@@ -281,7 +271,7 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
  * KG + source_check, aggregate. Aggregation rule: any disputed sub-
  * claim → parent disputed (single false component breaks the
  * conjunction). All verified → parent verified. Otherwise → null
- * so the caller can fall back to the LLM jury.
+ * so the caller can fall through to the exhausted path.
  */
 async function runCoveVerification(statement: string, sourceUrls: string[]): Promise<VerifyResult | null> {
   const subclaims = await decomposeClaim(statement);
@@ -350,8 +340,8 @@ async function runCoveVerification(statement: string, sourceUrls: string[]): Pro
 /**
  * Fetch each source URL, run NLI against the claim, return a verdict
  * if any source clearly supports or refutes. Returns null when every
- * source is neutral / unfetchable so the caller can fall back to LLM
- * jury.
+ * source is neutral / unfetchable so the caller can retry or fall
+ * through to the exhausted path.
  */
 async function runSourceCheck(statement: string, urls: string[]): Promise<VerifyResult | null> {
   const checks: SourceCheckResult[] = [];
@@ -620,23 +610,25 @@ function pickCitationSentence(chunk: string, claim: string): string | null {
   return best && best.score > 0 ? best.s.trim() : null;
 }
 
+/**
+ * Embedding-neighbor CANDIDATE scan for edge classification. Returns
+ * decided (verified|disputed) neighbors only — their statements feed
+ * the claim-pair NLI in `withCrossRef`, which decides SUPPORTS /
+ * CONTRADICTS / no-edge. The neighbor's verdict deliberately carries
+ * no meaning here: similarity+verdict is not a relation signal.
+ */
 async function dbCrossRef(
   claimId: string,
   entryId: string,
   embedding: number[],
-): Promise<{
-  corroborations: number;
-  contradictions: number;
-  corroboratingIds: string[];
-  contradictingIds: string[];
-}> {
+): Promise<Array<{ id: string; statement: string }>> {
   const vec = `[${embedding.join(',')}]`;
   // Cosine distance: 0 = identical, 2 = opposite. Convert to similarity.
   // Exclude the claim's OWN entry — other claims extracted from the
   // same source trivially rephrase each other and create a self-
-  // reinforcing echo chamber in the cross-ref score.
+  // reinforcing echo chamber in the candidate pool.
   const neighbors = await getDb().execute(sql`
-    SELECT id, verdict, 1 - (embedding <=> ${vec}::vector) AS similarity
+    SELECT id, statement
     FROM claim
     WHERE id <> ${claimId}
       AND entry_id <> ${entryId}
@@ -645,25 +637,7 @@ async function dbCrossRef(
     ORDER BY embedding <=> ${vec}::vector
     LIMIT 20
   `);
-
-  let corroborations = 0;
-  let contradictions = 0;
-  const corroboratingIds: string[] = [];
-  const contradictingIds: string[] = [];
-  for (const n of neighbors as unknown as Array<{
-    id: string;
-    verdict: string;
-    similarity: number;
-  }>) {
-    if (n.verdict === Verdict.Verified) {
-      corroborations++;
-      corroboratingIds.push(n.id);
-    } else if (n.verdict === Verdict.Disputed) {
-      contradictions++;
-      contradictingIds.push(n.id);
-    }
-  }
-  return { corroborations, contradictions, corroboratingIds, contradictingIds };
+  return (neighbors as unknown as Array<{ id: string; statement: string }>).map(n => ({ id: n.id, statement: n.statement }));
 }
 
 // Single-flight guard. `setInterval` fires every 60s but a full
@@ -755,7 +729,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
   const dueItems = due.map(r => ({ claimId: r.claim_id, attempts: r.attempts }));
 
   // Concurrent batch. Each claim's verify is dominated by network
-  // waits (URL fetches, LLM HTTP, SearXNG) — `Promise.allSettled`
+  // waits (cited-source fetches, LLM HTTP) — `Promise.allSettled`
   // overlaps those so an N-claim batch finishes in roughly the time
   // of the slowest single claim, not their sum. NLI/reranker model
   // forward passes still serialize on the JS thread, but those are
@@ -772,8 +746,8 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
         // the claim leaves the queue and the evidence trail records
         // why nothing landed. Without this the claim silently sits
         // at its initial verdict forever. `exhausted_pipeline` is a
-        // distinct source label so metrics separate this from genuine
-        // jury verdicts.
+        // distinct source label so metrics separate this from decided
+        // verdicts.
         result = {
           verdict: Verdict.Unverified,
           certainty: 0,
@@ -830,19 +804,26 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
       // verdict commit. writeClaimEdges is ON CONFLICT DO NOTHING
       // and FK-safe; failures are logged and swallowed inside.
       const ev = result!.evidence;
-      if (ev.contradictingClaimIds && ev.contradictingClaimIds.length > 0) {
-        await writeClaimEdges(item.claimId, ev.contradictingClaimIds, RelationType.Contradicts, {
-          weight: result!.certainty,
-          createdBy: VerdictTrigger.Auto,
-          metadata: { source: ev.source },
-        });
+      if (ev.contradicting && ev.contradicting.length > 0) {
+        // CONTRADICTS: claim → neighbor, weight = the classifying NLI
+        // contradiction probability (or kgConflict.confidence for
+        // KG-sourced targets) — NOT the claim's verdict certainty.
+        await writeClaimEdges(
+          item.claimId,
+          ev.contradicting.map(t => ({ id: t.id, weight: t.score })),
+          RelationType.Contradicts,
+          { direction: 'outgoing', createdBy: VerdictTrigger.Auto, metadata: { source: ev.source } },
+        );
       }
-      if (ev.corroboratingClaimIds && ev.corroboratingClaimIds.length > 0) {
-        await writeClaimEdges(item.claimId, ev.corroboratingClaimIds, RelationType.Supports, {
-          weight: result!.certainty,
-          createdBy: VerdictTrigger.Auto,
-          metadata: { source: ev.source },
-        });
+      if (ev.corroborating && ev.corroborating.length > 0) {
+        // SUPPORTS: neighbor → claim (premise=neighbor entailing this
+        // claim means the NEIGHBOR supports it), weight = entailment.
+        await writeClaimEdges(
+          item.claimId,
+          ev.corroborating.map(t => ({ id: t.id, weight: t.score })),
+          RelationType.Supports,
+          { direction: 'incoming', createdBy: VerdictTrigger.Auto, metadata: { source: ev.source } },
+        );
       }
       return { committed: true };
     }),

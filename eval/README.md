@@ -22,8 +22,8 @@ bun run eval:golden
 ```
 
 `eval:golden` (`src/eval/cli.ts`) creates a temp draft entry+claim per labelled row,
-runs the real `verifyClaim` (db-cross-ref → KG → source-NLI → CoVe → web search →
-escalation), compares the predicted verdict to the label, and persists one
+runs the real `verifyClaim` (edge candidates → KG contradiction → cited-source
+NLI → CoVe → sourceless finalize), compares the predicted verdict to the label, and persists one
 `golden_set_run` row with **macro-averaged precision / recall / F1 per verdict class**
 plus a per-claim-type breakdown and the full confusion list. It also computes
 regression vs the most recent prior run.

@@ -151,10 +151,13 @@ describe('MCP — find', () => {
     expect(seeded.filter(r => r.action === IngestAction.Stored).length).toBeGreaterThanOrEqual(3);
 
     const res = await client!.callTool({ name: 'find', arguments: { query: 'pgvector HNSW', limit: 5 } });
-    const data = res.structuredContent as { entries?: unknown[]; researched?: boolean };
+    const data = res.structuredContent as Record<string, unknown>;
     expect(Array.isArray(data.entries)).toBe(true);
-    expect((data.entries ?? []).length).toBeGreaterThan(0);
-    expect(typeof data.researched).toBe('boolean');
+    expect((data.entries as unknown[]).length).toBeGreaterThan(0);
+    // Restructure contract: find is stored-data only — the researched /
+    // research fields were REMOVED from the response shape entirely.
+    expect('researched' in data).toBe(false);
+    expect('research' in data).toBe(false);
   });
 });
 

@@ -93,14 +93,17 @@ services:
     profiles:
       - test
 
-  # Fine-tune sidecar: long-running container that wakes every
-  # KNOLDR_FT_INTERVAL_HOURS (default 168 = weekly), checks if
-  # enough new pseudo-gold has accumulated, and if so unloads
-  # Ollama models, LoRA-trains Gemma 4 E4B, exports a quantized
-  # GGUF, and registers it as knoldr-judge:vYYYYMMDD-HHMM. Default
-  # cadence is weekly so training never starves the live verify
-  # workers more than once a week and Ollama auto-reloads after.
+  # Fine-tune sidecar — OPT-IN ONLY (`docker compose --profile finetune up`).
+  # Off by default: its benefit is unmeasured until the golden-set eval
+  # accumulates enough labelled data to show the knoldr-judge adapter
+  # actually beats the base model, and it monopolizes the GPU weekly in
+  # the meantime. Re-enable once eval:golden demonstrates a win.
+  # When enabled: wakes every KNOLDR_FT_INTERVAL_HOURS, LoRA-trains
+  # Gemma 4 E4B on accumulated pseudo-gold, exports GGUF, registers
+  # knoldr-judge:vYYYYMMDD-HHMM (Ollama auto-reloads after).
   finetune:
+    profiles:
+      - finetune
     build:
       context: ./finetune
     environment:

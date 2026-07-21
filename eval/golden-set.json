@@ -1,0 +1,102 @@
+[
+  {
+    "id": "bun-jsc",
+    "statement": "Bun is a JavaScript runtime built on Apple's JavaScriptCore engine.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "javascript",
+    "sourceUrls": ["https://bun.sh/docs"],
+    "labeledBy": "knoldr-seed",
+    "notes": "Starter seed. These rows are illustrative, not an authoritative gold set — expand and curate with domain experts before turning on EVAL_FAIL_ON_REGRESSION."
+  },
+  {
+    "id": "pgvector-hnsw",
+    "statement": "The pgvector extension for PostgreSQL supports HNSW indexes for approximate nearest-neighbor search.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "databases",
+    "sourceUrls": ["https://github.com/pgvector/pgvector"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "http-404-notfound",
+    "statement": "The HTTP 404 status code indicates that the server cannot find the requested resource.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "web",
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "git-distributed",
+    "statement": "Git is a distributed version control system.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "tools",
+    "sourceUrls": ["https://git-scm.com/about"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "ts-superset",
+    "statement": "TypeScript is a syntactic superset of JavaScript that adds optional static typing.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "programming",
+    "sourceUrls": ["https://www.typescriptlang.org/"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "postgres-relational",
+    "statement": "PostgreSQL is an ACID-compliant relational (SQL) database.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "databases",
+    "sourceUrls": ["https://www.postgresql.org/about/"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "http-200-notfound-false",
+    "statement": "An HTTP 200 status code means the requested resource was not found.",
+    "claimType": "factual",
+    "expectedVerdict": "disputed",
+    "domain": "web",
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/200"],
+    "labeledBy": "knoldr-seed",
+    "notes": "False — the source states 200 means the request succeeded; the verifier should find the source contradicts the claim."
+  },
+  {
+    "id": "git-centralized-false",
+    "statement": "Git is a centralized version control system that requires a constant connection to a central server to commit changes.",
+    "claimType": "factual",
+    "expectedVerdict": "disputed",
+    "domain": "tools",
+    "sourceUrls": ["https://git-scm.com/about"],
+    "labeledBy": "knoldr-seed",
+    "notes": "False — the source describes Git as distributed with full local history."
+  },
+  {
+    "id": "rust-best-subjective",
+    "statement": "Rust is the best programming language.",
+    "claimType": "subjective",
+    "expectedVerdict": "not-applicable",
+    "domain": "programming",
+    "labeledBy": "knoldr-seed",
+    "notes": "Non-factual — production never verifies subjective claims; they ship as not-applicable."
+  },
+  {
+    "id": "wasm-2030-predictive",
+    "statement": "By 2030, most web front-ends will be compiled to WebAssembly.",
+    "claimType": "predictive",
+    "expectedVerdict": "not-applicable",
+    "domain": "web",
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "tdd-normative",
+    "statement": "Developers should write tests before writing implementation code.",
+    "claimType": "normative",
+    "expectedVerdict": "not-applicable",
+    "domain": "practices",
+    "labeledBy": "knoldr-seed"
+  }
+]

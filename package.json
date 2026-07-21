@@ -18,6 +18,7 @@
     "docker:test": "docker compose --profile test up -d --wait db-test",
     "docker:up": "docker compose up -d --wait db",
     "eval:golden": "bun run src/eval/cli.ts",
+    "eval:load": "bun run scripts/load-golden.ts",
     "format": "bunx oxfmt . --check",
     "format:write": "bunx oxfmt .",
     "knip": "bunx knip",

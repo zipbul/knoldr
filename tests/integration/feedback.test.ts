@@ -54,15 +54,18 @@ afterAll(async () => {
 let entryCounter = 0;
 async function createTestEntry() {
   entryCounter++;
-  // fakeEmbedding in mock-apis.ts hashes only the first 384 chars position
-  // by position, so varying tokens must appear early in the string to
-  // yield distinct vectors. Put the unique id at the very start.
+  // fakeEmbedding in mock-apis.ts hashes the first 384 chars position by
+  // position, so two contents differing only in a ~20-char leading id stay
+  // >0.95 cosine-similar and the ingest dedup marks the second one a
+  // duplicate (flaky CI failure). Repeat the unique id across the whole
+  // content so most of the hashed positions differ between entries.
   const uniqueId = `${entryCounter}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const uniqueContent = Array.from({ length: 12 }, () => uniqueId).join(' ');
   const input = parseStoreInput({
     entries: [
       {
         title: `${uniqueId} Feedback Test Entry`,
-        content: `${uniqueId} Completely unique and different content for feedback testing.`,
+        content: `${uniqueContent} feedback testing body.`,
         domain: [`testing-${entryCounter}`],
       },
     ],

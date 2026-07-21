@@ -283,7 +283,9 @@ describe('migrate — snake → kebab conversion', () => {
     await seed.unsafe(
       `INSERT INTO claim_relation (id, source_claim_id, target_claim_id, relation_type, created_by)
        VALUES ('cr-1', 'claim-1', 'claim-2', 'derives_from', 'auto'),
-              ('cr-2', 'claim-2', 'claim-1', 'superseded_by', 'auto')`,
+              ('cr-2', 'claim-2', 'claim-1', 'superseded_by', 'auto'),
+              ('cr-3', 'claim-1', 'claim-2', 'supports', 'auto'),
+              ('cr-4', 'claim-1', 'claim-2', 'contradicts', 'auto')`,
     );
     await seed.unsafe(`INSERT INTO claim_feedback
       (id, claim_id, reporter_agent_id, application_method, outcome,
@@ -342,6 +344,17 @@ describe('migrate — snake → kebab conversion', () => {
       SELECT relation_type FROM claim_relation WHERE id IN ('cr-1','cr-2') ORDER BY id
     `;
     expect(crTypes.map(r => r.relation_type)).toEqual(['derives-from', 'superseded-by']);
+
+    // 0002_delete_legacy_supports: every pre-restructure SUPPORTS row came
+    // from the deleted cross-ref promotion branch (wrong direction, wrong
+    // weight, similarity-based provenance) — the data migration removes
+    // them. CONTRADICTS rows are retained (mixed KG/cross-ref provenance).
+    const crLegacy = await verify<{ id: string; relation_type: string }[]>`
+      SELECT id, relation_type FROM claim_relation WHERE id IN ('cr-3','cr-4') ORDER BY id
+    `;
+    expect(crLegacy).toHaveLength(1);
+    expect(crLegacy[0]!.id).toBe('cr-4');
+    expect(crLegacy[0]!.relation_type).toBe('contradicts');
 
     const cfRows = await verify<
       {

@@ -50,11 +50,11 @@ function callerAgent(extra: { authInfo?: { clientId?: string } }): string {
   return extra.authInfo?.clientId ?? ANONYMOUS_AGENT;
 }
 
-const FIND_DESC = `Search stored knowledge. If results are insufficient, automatically crawls the web to collect new data, then re-searches.
+const FIND_DESC = `Search the verified-fact warehouse. Instant, stored-data only — knoldr NEVER searches the web.
 
 Input: { query?, topic? (alias for query; omit both for filter-only browsing), domain?, tags?, language? (ISO 639-1), minAuthority? (0-1), minTrustLevel? "high"|"medium"|"low", limit? (default 10, max 50), cursor? }
-Output: { entries[], scores[], trustLevels[], nextCursor?, factBundles[] (verified atomic claims + 1-hop graph context: supports/contradicts/derivesFrom/supersededBy/refines), researched, research? }
-Long auto-research emits progress notifications when the caller supplies a progressToken.`;
+Output: { entries[], scores[], trustLevels[], nextCursor?, factBundles[] (verified atomic claims + 1-hop graph context: supports/contradicts/derivesFrom/supersededBy/refines) }
+Thin results mean the warehouse does not know this topic yet: run your own web search for immediate needs, ingest what you find WITH cited source URLs (they will be verified), then re-query later for verified factBundles`;
 
 const INGEST_DESC = `Submit pre-extracted text into Knoldr. The agent owns format conversion (PDF/OCR/ASR/local-file); hand plain text here. Provide exactly one of 'raw' or 'entries'.
 
@@ -62,7 +62,7 @@ Mode 1 — raw: { raw: string (<=200000 chars), sources?: [{ url, sourceType, tr
 Mode 2 — structured: { entries: [{ title, content, domain: string[], tags?, language? }], sources? }  (skips decompose)
 sourceType ∈ official-docs|github-release|cve-db|official-blog|research-paper|established-blog|community-forum|personal-blog|ai-generated|reference-wiki|unknown
 Output: { ok: true, results[], storedCount, duplicateCount, rejectedCount } | { ok: false, error, message }
-Stored entries flow through claim extraction + verification automatically.`;
+You are the data inlet — ALWAYS cite source URLs: verification grounds each claim against its cited live sources, and uncited factual claims stay unverified forever. Stored entries flow through claim extraction + verification automatically.`;
 
 const FEEDBACK_DESC = `Record a positive/negative signal against a stored entry; atomically adjusts the entry's authority used by future find rankings. Your agent identity comes from your authenticated token — do NOT pass an agent id.
 

@@ -10,7 +10,7 @@ import { verifyClaim } from './verify';
 // Without a human-labeled gold set we can't measure absolute
 // accuracy. But we *can* detect regressions: treat high-consensus
 // claims (verdicts produced by source_check AND confirmed by KG or
-// by counter-search) as a synthetic gold set, periodically re-run
+// by cited-source grounding) as a synthetic gold set, periodically re-run
 // the full pipeline on them, and flag any diverging verdicts as
 // regressions. When divergence spikes, something shifted in the
 // model, the retrieval layer, or a threshold — the same signal a

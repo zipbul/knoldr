@@ -4,7 +4,7 @@ Open gaps that prevent Knoldr from fully serving as the zipbul agentic data back
 
 ## 1. Multimodal & local-file ingestion
 
-**Role**: Widen the data inlet. Today the only entry path is web research text via LangSearch.
+**Role**: Widen the data inlet. Today agents ingest plain text with cited source URLs; knoldr itself never acquires data (no search services by design).
 
 **Function**:
 

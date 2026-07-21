@@ -2,9 +2,16 @@
 //
 // Centralizes every place CONTRADICTS / SUPPORTS / DERIVES_FROM /
 // SUPERSEDED_BY / REFINES edges land. Callers pass:
-//   - sourceClaimId: the just-decided claim
-//   - targetClaimIds: the existing claims being linked
-//   - relationType, weight, createdBy ('auto' or agent_id), metadata
+//   - pivotClaimId: the just-decided claim
+//   - targets: the existing claims being linked — plain ids or
+//     { id, weight } for per-edge weights (cross-ref edges carry the
+//     classifying NLI probability, not the claim's verdict certainty)
+//   - relationType, opts (fallback weight, createdBy, metadata, direction)
+//
+// direction: 'outgoing' (default) writes pivot→target rows; 'incoming'
+// writes target→pivot rows — required for SUPPORTS, whose semantics are
+// "the neighbor supports THIS claim" (many sources → one target), which
+// the outgoing shape cannot express.
 //
 // All writes are idempotent — the (source, target, relation_type)
 // unique index lets us issue ON CONFLICT DO NOTHING. Self-loops are
@@ -19,36 +26,54 @@ import { logger } from '../observability/logger';
 
 type ClaimRelationType = 'supports' | 'contradicts' | 'derives-from' | 'superseded-by' | 'refines';
 
+interface EdgeTarget {
+  id: string;
+  /** Per-edge weight (e.g. the classifying NLI probability). Falls back to opts.weight. */
+  weight?: number;
+}
+
 interface WriteEdgesOptions {
-  weight?: number; // default 1.0
+  weight?: number; // fallback weight, default 1.0
   createdBy?: string; // default 'auto'
   metadata?: Record<string, unknown>;
+  direction?: 'outgoing' | 'incoming'; // default 'outgoing'
 }
 
 export async function writeClaimEdges(
-  sourceClaimId: string,
-  targetClaimIds: string[],
+  pivotClaimId: string,
+  targets: Array<string | EdgeTarget>,
   relationType: ClaimRelationType,
   opts: WriteEdgesOptions = {},
 ): Promise<number> {
-  if (targetClaimIds.length === 0) {
+  if (targets.length === 0) {
     return 0;
   }
-  const distinct = Array.from(new Set(targetClaimIds)).filter(id => id && id !== sourceClaimId);
+  const fallbackWeight = opts.weight ?? 1.0;
+  const normalized = targets.map(t =>
+    typeof t === 'string' ? { id: t, weight: fallbackWeight } : { id: t.id, weight: t.weight ?? fallbackWeight },
+  );
+  const seen = new Set<string>();
+  const distinct = normalized.filter(t => {
+    if (!t.id || t.id === pivotClaimId || seen.has(t.id)) {
+      return false;
+    }
+    seen.add(t.id);
+    return true;
+  });
   if (distinct.length === 0) {
     return 0;
   }
 
-  const weight = opts.weight ?? 1.0;
   const createdBy = opts.createdBy ?? 'auto';
   const metadata = opts.metadata ?? null;
+  const direction = opts.direction ?? 'outgoing';
 
-  const values = distinct.map(targetId => ({
+  const values = distinct.map(t => ({
     id: ulid(),
-    sourceClaimId,
-    targetClaimId: targetId,
+    sourceClaimId: direction === 'outgoing' ? pivotClaimId : t.id,
+    targetClaimId: direction === 'outgoing' ? t.id : pivotClaimId,
     relationType,
-    weight,
+    weight: t.weight,
     createdBy,
     metadata,
   }));
@@ -65,8 +90,9 @@ export async function writeClaimEdges(
     if (inserted.length > 0) {
       logger.info(
         {
-          sourceClaimId,
+          pivotClaimId,
           relationType,
+          direction,
           attempted: distinct.length,
           inserted: inserted.length,
           createdBy,
@@ -81,7 +107,7 @@ export async function writeClaimEdges(
     // swallow so the verify pipeline isn't blocked by stale references.
     logger.warn(
       {
-        sourceClaimId,
+        pivotClaimId,
         relationType,
         targets: distinct.length,
         error: (err as Error).message,

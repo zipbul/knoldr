@@ -3,9 +3,7 @@ import { z } from 'zod';
 import type { SearchResult } from '../../search/search';
 
 import { fetchClaimsForEntries, fetchFactBundlesForEntries, fetchFactualityForEntries } from '../../claim/query';
-import { research } from '../../collect/research';
 import { NOOP_PROGRESS, type Progress } from '../../lib/progress';
-import { logger } from '../../observability/logger';
 import { SortBy, TrustLevel } from '../../score/enums';
 import { search, explore } from '../../search/search';
 
@@ -41,12 +39,15 @@ async function handleFind(input: Record<string, unknown>, progress: Progress = N
       limit: validated.limit,
       cursor: validated.cursor,
     });
-    return await formatResult(result, false, undefined, undefined);
+    return await formatResult(result, undefined);
   }
 
-  // Step 1: search existing data
+  // Single stored-data search — find NEVER researches. knoldr is a
+  // pure verified warehouse: on thin results the tool contract tells
+  // the agent to run its own web search and ingest findings WITH
+  // cited source URLs, then re-query later for verified facts.
   progress.emit('search_stored', { query: queryText });
-  const firstResult = await search({
+  const result = await search({
     query: queryText,
     domain: validated.domain,
     tags: validated.tags,
@@ -56,92 +57,10 @@ async function handleFind(input: Record<string, unknown>, progress: Progress = N
     limit: validated.limit,
     cursor: validated.cursor,
   });
-
-  // Enough results AND top match actually covers the query → return.
-  // OR-based FTS (search.ts) can return entries that share only one
-  // incidental query term (e.g. "2023"); count alone is not a quality
-  // signal. termCoverage from rank.ts expresses how much of the query
-  // the top entry actually covers.
-  const MIN_RESULTS = 3;
-  const MIN_TOP_COVERAGE = 0.4;
-  const topCoverage = firstResult.scores[0]?.termCoverage ?? 0;
-  const enoughResults = firstResult.entries.length >= MIN_RESULTS;
-  const strongTopMatch = topCoverage >= MIN_TOP_COVERAGE;
-  if (validated.cursor || (enoughResults && strongTopMatch)) {
-    return await formatResult(firstResult, false, undefined, queryText);
-  }
-
-  // Step 2: auto-research to collect new data
-  logger.info(
-    {
-      query: queryText,
-      found: firstResult.entries.length,
-      minResults: MIN_RESULTS,
-      topCoverage,
-      minTopCoverage: MIN_TOP_COVERAGE,
-    },
-    'find: insufficient or weak results, starting auto-research',
-  );
-  progress.emit('research_started', {
-    query: queryText,
-    storedMatches: firstResult.entries.length,
-    topCoverage,
-  });
-
-  const researchResult = await research(
-    {
-      topic: queryText,
-      domain: validated.domain,
-    },
-    progress,
-  );
-
-  logger.info(
-    {
-      urlsProcessed: researchResult.urlsProcessed,
-      entriesStored: researchResult.entriesStored,
-      entriesSkippedLowRelevance: researchResult.entriesSkippedLowRelevance,
-    },
-    'find: auto-research completed',
-  );
-  progress.emit('research_completed', {
-    urlsProcessed: researchResult.urlsProcessed,
-    entriesStored: researchResult.entriesStored,
-    entriesSkippedLowRelevance: researchResult.entriesSkippedLowRelevance,
-    status: researchResult.status,
-  });
-
-  // Step 3: re-search with newly ingested data
-  progress.emit('search_rerun');
-  const finalResult = await search({
-    query: queryText,
-    domain: validated.domain,
-    tags: validated.tags,
-    language: validated.language,
-    minAuthority: validated.minAuthority,
-    minTrustLevel: validated.minTrustLevel,
-    limit: validated.limit,
-  });
-
-  return await formatResult(
-    finalResult,
-    true,
-    {
-      urlsProcessed: researchResult.urlsProcessed,
-      entriesStored: researchResult.entriesStored,
-      entriesSkippedLowRelevance: researchResult.entriesSkippedLowRelevance,
-    },
-    queryText,
-  );
+  return await formatResult(result, queryText);
 }
 
-interface ResearchStats {
-  urlsProcessed: number;
-  entriesStored: number;
-  entriesSkippedLowRelevance: number;
-}
-
-async function formatResult(result: SearchResult, researched: boolean, researchStats?: ResearchStats, query?: string) {
+async function formatResult(result: SearchResult, query?: string) {
   // v0.3: attach top claims + factuality to each entry when present.
   // fetchClaimsForEntries returns an empty map when no claims exist for
   // the given entries, so this is a zero-cost no-op for v0.2 callers.
@@ -179,8 +98,6 @@ async function formatResult(result: SearchResult, researched: boolean, researchS
     // v0.4 retrieval surface — verified facts with graph context.
     // Empty array when no verified claims exist for the result set.
     factBundles,
-    researched,
-    ...(researchStats && { research: researchStats }),
   };
 }
 

@@ -1,0 +1,19 @@
+-- Data migration: delete legacy SUPPORTS claim_relation rows.
+--
+-- Every SUPPORTS row written before the no-search restructure came from
+-- exactly one code path: verify's deleted db-cross-ref promotion branch
+-- (corroboratingClaimIds was set only there). Those rows carry the OLD
+-- semantics on every axis the restructure corrected:
+--   - provenance: embedding-similarity + neighbor-verdict, not claim-pair
+--     NLI classification;
+--   - direction:  claim→neighbor, while the new contract writes
+--     neighbor→claim ("the neighbor supports this claim") and the
+--     factBundle read path surfaces SUPPORTS incoming-only — legacy rows
+--     would surface in the WRONG bundle with inverted meaning;
+--   - weight:     the claim's verdict certainty, not relation strength.
+-- They are regenerable graph context; deletion is the honest cleanup.
+--
+-- Legacy CONTRADICTS rows are retained: they mix KG-conflict provenance
+-- (sound) with cross-ref similarity provenance (contaminated) and cannot
+-- be reliably separated — accepted, documented imperfection.
+DELETE FROM "claim_relation" WHERE "relation_type" = 'supports';

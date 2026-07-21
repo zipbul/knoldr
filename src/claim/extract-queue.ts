@@ -10,7 +10,7 @@ import { priorityForEntry } from './verify';
  * Claim extraction runs out-of-band relative to ingest. This processor
  * picks up to `batchSize` entries that do not yet have any claims and
  * extracts them one at a time. Serialization keeps the LLM CLI spawn
- * count bounded even under bursty research (LangSearch → 20 entries per
+ * count bounded even under bursty agent ingestion (batch submits of 20+ entries per
  * second would otherwise spawn 20 parallel CLI subprocesses).
  */
 export async function processClaimExtractionQueue(batchSize = 3): Promise<number> {

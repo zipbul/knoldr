@@ -1,6 +1,6 @@
 /**
  * Progress reporter threaded through long-running pipeline work
- * (currently `find`'s auto-research, which drives `collect/research`).
+ * (kept for long-running tool calls; find is now a pure instant search).
  *
  * Transport-neutral on purpose: domain/pipeline code emits progress
  * without depending on the MCP layer. The MCP bridge that turns each

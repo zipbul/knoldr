@@ -39,7 +39,7 @@ export async function handleFeedback(input: Record<string, unknown>, callerAgent
   try {
     const { entryId, newAuthority } = await processFeedback(validated.entryId, validated.signal, reasonStored, callerAgentId);
     // Route the structured reason to its downstream action (re-verify
-    // queue / re-research / gap log). Best-effort — the authority
+    // queue / gap log). Best-effort — the authority
     // update already committed, so a routing failure must not surface
     // as an end-user error.
     if (validated.reason) {

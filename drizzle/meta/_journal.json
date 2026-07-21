@@ -15,6 +15,13 @@
       "when": 1778951000000,
       "tag": "0001_kebab_cleanup",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784500000000,
+      "tag": "0002_delete_legacy_supports",
+      "breakpoints": true
     }
   ]
 }

@@ -24,8 +24,10 @@ async function routeFeedbackAction(input: RouteInput): Promise<void> {
       await reverifyEntryClaims(input.entryId, entryCreatedAt);
       return;
     case FeedbackReason.Outdated:
-      // Re-research is heavier (LangSearch hit + ingest) and depends on
-      // the topic; defer to a worker that batches outdated signals.
+      // knoldr never re-researches (agents are the only data inlet) —
+      // outdated means: stamp the entry and re-verify its claims
+      // against their CITED sources; fresh evidence arrives only when
+      // an agent re-ingests newer material.
       await markOutdated(input.entryId, entryCreatedAt);
       return;
     case FeedbackReason.Missing:
@@ -75,10 +77,10 @@ async function reverifyEntryClaims(entryId: string, entryCreatedAt: Date): Promi
   logger.info({ entryId, claimsRequeued: claims.length }, 'feedback wrong: claims requeued for re-verification');
 }
 
-// Records an outdated signal on the entry by stamping its metadata.
-// A follow-up worker reads recently-outdated entries and triggers a
-// fresh LangSearch + ingest pass; we don't run that synchronously here
-// because it can take 30s+ and the feedback caller is waiting.
+// Records an outdated signal on the entry by stamping its metadata
+// and re-queuing its claims for verification against their CITED
+// sources. There is no re-research: knoldr uses no search services —
+// newer evidence enters only via agent re-ingestion.
 async function markOutdated(entryId: string, entryCreatedAt: Date): Promise<void> {
   await getDb().execute(sql`
     UPDATE entry
@@ -86,8 +88,8 @@ async function markOutdated(entryId: string, entryCreatedAt: Date): Promise<void
                    || jsonb_build_object('outdated_at', NOW()::text)
     WHERE id = ${entryId} AND created_at = ${entryCreatedAt.toISOString()}::timestamptz
   `);
-  // Also bump verify_queue for claims so a next pass re-grounds them
-  // against whatever new evidence the re-research worker pulls in.
+  // Bump verify_queue for claims so a next pass re-grounds them
+  // against the currently-cited (possibly updated) live sources.
   await reverifyEntryClaims(entryId, entryCreatedAt);
   logger.info({ entryId }, 'feedback outdated: entry marked, claims requeued');
 }

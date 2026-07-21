@@ -18,7 +18,7 @@ const MAX_BODY_BYTES = 1 * 1024 * 1024;
 const SESSION_IDLE_MS = 10 * 60 * 1000;
 const SESSION_SWEEP_MS = 60 * 1000;
 
-const INSTRUCTIONS = `Knoldr — AI-native verified-fact warehouse. Search stored knowledge and auto-collect from the web (find); submit text (ingest); rate entries and claims (feedback, claim_feedback); and walk the entity and claim graphs (neighbors, provenance, contradictions).`;
+const INSTRUCTIONS = `Knoldr — AI-native verified-fact warehouse. Agents are the only data inlet: search the web yourselves and ingest findings WITH cited source URLs; knoldr verifies claims against those cited sources and serves them instantly (find). Rate entries and claims (feedback, claim_feedback); walk the entity and claim graphs (neighbors, provenance, contradictions).`;
 
 interface Session {
   transport: WebStandardStreamableHTTPServerTransport;
@@ -177,7 +177,8 @@ function startMcpServer() {
   const server = Bun.serve({
     port,
     hostname: host,
-    // `find` auto-research can run for minutes; the transport streams
+    // Long non-streaming tool calls (ingest runs LLM decompose, Ollama
+    // timeout 120s) must not be severed mid-flight; the transport streams
     // progress notifications over this connection, but keep a generous idle
     // window as a backstop.
     idleTimeout: 255,

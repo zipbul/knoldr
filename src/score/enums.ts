@@ -85,6 +85,10 @@ export enum EvidenceSource {
   Cove = 'cove',
   ExhaustedPipeline = 'exhausted-pipeline',
   ExceptionFinalize = 'exception-finalize',
+  // Sourceless factual claims finalize in a single pass — under strict
+  // grounding nothing can ever verify a claim with no cited sources, so
+  // retry/backoff ("all paths returned null") does not describe them.
+  NoCitedSources = 'no-cited-sources',
 }
 
 // ============================================================

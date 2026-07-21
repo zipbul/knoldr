@@ -1,4 +1,4 @@
-// ingest A2A skill — direct external entry point into the storage
+// ingest MCP tool — direct external entry point into the storage
 // engine. FUTURE.md #1 (multimodal) MVP: Knoldr stays text-centric;
 // the *agent* owns format conversion (PDF parser, OCR, ASR, local
 // file reader). Once the agent has plain text, it submits via this
@@ -30,20 +30,19 @@ import { ingest } from '../../ingest/engine';
 import { parseStoreInput } from '../../ingest/validate';
 import { logger } from '../../observability/logger';
 
-// Top-level zod gate just to bound the JSON payload size at the A2A
+// Top-level zod gate just to bound the JSON payload size at the tool
 // boundary; parseStoreInput re-validates with the precise discriminated
 // schema. Validating twice is intentional — the outer cap fails fast on
 // 50MB blobs without bringing the full engine schema into agent-facing
 // error surface.
-const envelopeSchema = z
-  .object({
-    raw: z.string().max(200_000).optional(),
-    entries: z.array(z.unknown()).max(20).optional(),
-    sources: z.array(z.unknown()).max(20).optional(),
-  })
-  .refine(v => v.raw !== undefined || v.entries !== undefined, {
-    message: "ingest requires either 'raw' or 'entries'",
-  });
+const ingestInputShape = {
+  raw: z.string().max(200_000).optional(),
+  entries: z.array(z.unknown()).max(20).optional(),
+  sources: z.array(z.unknown()).max(20).optional(),
+};
+const envelopeSchema = z.object(ingestInputShape).refine(v => v.raw !== undefined || v.entries !== undefined, {
+  message: "ingest requires either 'raw' or 'entries'",
+});
 
 type IngestSkillResult =
   | { ok: true; results: IngestResult[]; storedCount: number; duplicateCount: number; rejectedCount: number }
@@ -97,3 +96,5 @@ export async function handleIngest(input: Record<string, unknown>): Promise<Inge
     rejectedCount,
   };
 }
+
+export { ingestInputShape };

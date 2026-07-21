@@ -542,7 +542,7 @@ interface EvidenceWithFingerprint extends SourceEvidence {
  * same group even when A and C aren't directly similar.
  */
 function assignIndependenceGroups(evidences: EvidenceWithFingerprint[]): void {
-  const parent = new Array(evidences.length).fill(0).map((_, i) => i);
+  const parent = Array.from({ length: evidences.length }, (_, i) => i);
   const find = (x: number): number => {
     while (parent[x] !== x) {
       parent[x] = parent[parent[x]!]!;

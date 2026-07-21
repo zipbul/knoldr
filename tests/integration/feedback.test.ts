@@ -139,7 +139,10 @@ describe('Feedback — rate limiting', () => {
     const entryId = await createTestEntry();
     await processFeedback(entryId, Signal.Positive, undefined, 'agent-rl');
 
-    await expect(processFeedback(entryId, Signal.Positive, undefined, 'agent-rl')).rejects.toThrow(RateLimitError);
+    // bun's `.rejects.toThrow()` resolves a Promise at runtime but is typed as non-thenable; cast so the await is honored.
+    await (expect(processFeedback(entryId, Signal.Positive, undefined, 'agent-rl')).rejects.toThrow(
+      RateLimitError,
+    ) as unknown as Promise<void>);
   });
 
   test.skipIf(!dbAvailable)('different agent on same entry is allowed', async () => {
@@ -192,7 +195,7 @@ describe('Feedback — structured-reason routing', () => {
     }
     const claimId = `01TEST${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`.padEnd(26, 'X').slice(0, 26);
     // Embedding column requires vector(384); use zero-padded literal.
-    const zeroVec = `[${new Array(384).fill(0).join(',')}]`;
+    const zeroVec = `[${Array.from({ length: 384 }, () => 0).join(',')}]`;
     await sql`
       INSERT INTO claim (id, entry_id, entry_created_at, statement, type, verdict, certainty, embedding, created_at)
       VALUES (${claimId}, ${entryId}, ${entryRow.created_at as Date}, 'test claim', 'factual', 'unverified', 0.5, ${zeroVec}::vector, NOW())

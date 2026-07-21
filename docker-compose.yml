@@ -26,6 +26,11 @@ services:
       KNOLDR_PORT: '5100'
       KNOLDR_HOST: '0.0.0.0'
       KNOLDR_LOG_LEVEL: '${KNOLDR_LOG_LEVEL:-info}'
+      # Fail-closed auth: the container binds 0.0.0.0 (reachable), so the
+      # MCP /mcp endpoint REQUIRES a bearer token. With NODE_ENV=production
+      # (and the host-aware rule in src/mcp/auth.ts) a blank token makes the
+      # app refuse to start rather than serve unauthenticated. Set it in .env.
+      NODE_ENV: '${NODE_ENV:-production}'
       KNOLDR_API_TOKEN: '${KNOLDR_API_TOKEN:-}'
       LANGSEARCH_API_KEY: '${LANGSEARCH_API_KEY:-}'
       # Local Ollama on the host. host.docker.internal maps to the

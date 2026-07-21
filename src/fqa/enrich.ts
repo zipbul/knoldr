@@ -1,8 +1,8 @@
 // FQA enrichment — run the full enrichment loop on one feedback row.
 //
-// Background-only. No A2A skill exposes this; the workers under
+// Background-only. No MCP tool exposes this; the workers under
 // `workers.ts` call it on a schedule. Reporter-driven completion is
-// handled by `claim_feedback` (update mode) on the main A2A.
+// handled by the `claim_feedback` MCP tool (update mode).
 //
 // Steps:
 //   1. Load the row + the referenced claim's statement.

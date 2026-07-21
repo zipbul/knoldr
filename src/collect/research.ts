@@ -1,7 +1,6 @@
-import type { Progress } from '../a2a/types';
-
 import { ingest } from '../ingest/engine';
 import { parseStoreInput } from '../ingest/validate';
+import { NOOP_PROGRESS, type Progress } from '../lib/progress';
 import { logger } from '../observability/logger';
 import { SourceType } from '../score/enums';
 import { classifyBatch } from './classify-batch';
@@ -9,7 +8,6 @@ import { decomposeQuery } from './query-decompose';
 import { collectSearchHits, type SearchHit } from './search-scraper';
 import { splitText, deriveTitle } from './text-split';
 
-const NOOP_PROGRESS: Progress = { emit: () => {} };
 const TITLE_MAX = 500;
 const MAX_CHUNKS_PER_URL = 5;
 const MAX_TOTAL_CHUNKS = 100;

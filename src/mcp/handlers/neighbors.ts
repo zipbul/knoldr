@@ -1,4 +1,4 @@
-// neighbors A2A skill — n-hop walk over the entity KG.
+// neighbors MCP tool — n-hop walk over the entity KG.
 //
 // Lookup is by entity name (case-insensitive) or by entity ULID.
 // Returns the connected entities up to `hops` away, optionally
@@ -13,7 +13,7 @@ import { getDb } from '../../db/connection';
 const MAX_HOPS = 4;
 const MAX_RESULTS = 200;
 
-const inputSchema = z.object({
+const neighborsInputShape = {
   entity: z.string().min(1).max(200),
   // When entity is a human name and multiple entities share that
   // name across types (the unique key is (type, lower(name))),
@@ -23,7 +23,8 @@ const inputSchema = z.object({
   relationType: z.string().max(80).optional(),
   hops: z.number().int().min(1).max(MAX_HOPS).default(1),
   limit: z.number().int().min(1).max(MAX_RESULTS).default(50),
-});
+};
+const inputSchema = z.object(neighborsInputShape);
 
 interface NeighborEntity {
   id: string;
@@ -147,3 +148,5 @@ export async function handleNeighbors(input: Record<string, unknown>): Promise<N
     })),
   };
 }
+
+export { neighborsInputShape };

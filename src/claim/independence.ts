@@ -53,7 +53,7 @@ function simhash(text: string): bigint {
   if (tokens.length < SHINGLE_LEN) {
     return 0n;
   }
-  const counts = new Array<number>(HASH_BITS).fill(0);
+  const counts = Array.from({ length: HASH_BITS }, () => 0);
   for (let i = 0; i <= tokens.length - SHINGLE_LEN; i++) {
     const shingle = tokens.slice(i, i + SHINGLE_LEN).join(' ');
     const h = fnv64(shingle);

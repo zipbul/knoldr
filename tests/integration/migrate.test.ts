@@ -252,7 +252,7 @@ describe('migrate — snake → kebab conversion', () => {
         FOREIGN KEY (entry_id, entry_created_at) REFERENCES entry(id, created_at) ON DELETE CASCADE
       )
     `);
-    const zeroVec = `[${new Array(384).fill(0).join(',')}]`;
+    const zeroVec = `[${Array.from({ length: 384 }, () => 0).join(',')}]`;
     await seed.unsafe(
       `INSERT INTO entry (id, title, content, created_at, embedding) VALUES ('legacy-1', 't', 'c', '2025-06-15T00:00:00Z', '${zeroVec}'::vector)`,
     );

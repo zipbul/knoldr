@@ -73,8 +73,8 @@ async function handleServe(args: string[]) {
     process.env.KNOLDR_HOST = values.host;
   }
 
-  const { startServer } = await import('../a2a/server');
-  startServer();
+  const { startApp } = await import('../bootstrap');
+  await startApp();
 
   // Keep process alive — server runs indefinitely
   await new Promise(() => {});

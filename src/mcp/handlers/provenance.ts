@@ -1,4 +1,4 @@
-// provenance A2A skill — walk DERIVES_FROM edges back to the roots.
+// provenance MCP tool — walk DERIVES_FROM edges back to the roots.
 //
 // Given a claim ID, returns every ancestor reachable via the
 // `derives_from` claim_relation edges, plus each ancestor's
@@ -9,14 +9,16 @@ import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { getDb } from '../../db/connection';
+import { RelationType } from '../../score/enums';
 
 const MAX_DEPTH = 8;
 const MAX_RESULTS = 100;
 
-const inputSchema = z.object({
+const provenanceInputShape = {
   claimId: z.string().min(1).max(200),
   maxDepth: z.number().int().min(1).max(MAX_DEPTH).default(4),
-});
+};
+const inputSchema = z.object(provenanceInputShape);
 
 interface ProvenanceNode {
   claimId: string;
@@ -65,7 +67,7 @@ export async function handleProvenance(input: Record<string, unknown>): Promise<
       UNION ALL
       SELECT cr.target_claim_id, w.depth + 1
       FROM walk w
-      JOIN claim_relation cr ON cr.source_claim_id = w.cid AND cr.relation_type = 'derives-from'
+      JOIN claim_relation cr ON cr.source_claim_id = w.cid AND cr.relation_type = ${RelationType.DerivesFrom}
       WHERE w.depth < ${validated.maxDepth}
     )
     SELECT
@@ -103,3 +105,5 @@ export async function handleProvenance(input: Record<string, unknown>): Promise<
     })),
   };
 }
+
+export { provenanceInputShape };

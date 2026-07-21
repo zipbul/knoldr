@@ -38,6 +38,14 @@ jobs:
       - name: Circular dependencies
         run: bunx dpdm --no-warning --no-tree --exit-code circular:1 src
 
+      # The production bundle is what the image runs; a bundler-breaking
+      # change (e.g. a new dependency that won't bundle) must fail here,
+      # not at deploy. Runs BEFORE knip: the `start` script references
+      # dist/knoldr.js, which knip reports as an unlisted binary when the
+      # bundle doesn't exist yet.
+      - name: Build smoke (bundle must compile)
+        run: bun run build && test -s dist/knoldr.js
+
       - name: Unused exports / files
         run: bunx knip
 

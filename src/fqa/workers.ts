@@ -1,6 +1,6 @@
-// FQA background workers. No A2A surface — the reporter-facing
-// completion path runs through `claim_feedback` (update mode) on
-// the main Knoldr A2A.
+// FQA background workers. No MCP tool surface of their own — the
+// reporter-facing completion path runs through the `claim_feedback`
+// MCP tool (update mode).
 //
 // Primary enrichment path is *event-driven*: the claim_feedback
 // insert handler calls enqueueEnrichment(id) which kicks an in-

@@ -16,11 +16,7 @@
     "noImplicitOverride": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "noPropertyAccessFromIndexSignature": false,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
+    "noPropertyAccessFromIndexSignature": false
   },
   "include": ["src/**/*.ts"]
 }

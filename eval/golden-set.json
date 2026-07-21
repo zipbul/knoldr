@@ -5,9 +5,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "javascript",
-    "sourceUrls": [
-      "https://bun.sh/docs"
-    ],
+    "sourceUrls": ["https://bun.sh/docs"],
     "labeledBy": "knoldr-seed",
     "notes": "Starter seed. These rows are illustrative, not an authoritative gold set — expand and curate with domain experts before turning on EVAL_FAIL_ON_REGRESSION."
   },
@@ -17,9 +15,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "databases",
-    "sourceUrls": [
-      "https://github.com/pgvector/pgvector"
-    ],
+    "sourceUrls": ["https://github.com/pgvector/pgvector"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -28,9 +24,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "web",
-    "sourceUrls": [
-      "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"
-    ],
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -39,9 +33,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "tools",
-    "sourceUrls": [
-      "https://git-scm.com/about"
-    ],
+    "sourceUrls": ["https://git-scm.com/about"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -50,9 +42,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "programming",
-    "sourceUrls": [
-      "https://www.typescriptlang.org/"
-    ],
+    "sourceUrls": ["https://www.typescriptlang.org/"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -61,9 +51,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "databases",
-    "sourceUrls": [
-      "https://www.postgresql.org/about/"
-    ],
+    "sourceUrls": ["https://www.postgresql.org/about/"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -72,9 +60,7 @@
     "claimType": "factual",
     "expectedVerdict": "disputed",
     "domain": "web",
-    "sourceUrls": [
-      "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/200"
-    ],
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/200"],
     "labeledBy": "knoldr-seed",
     "notes": "False — the source states 200 means the request succeeded; the verifier should find the source contradicts the claim."
   },
@@ -84,9 +70,7 @@
     "claimType": "factual",
     "expectedVerdict": "disputed",
     "domain": "tools",
-    "sourceUrls": [
-      "https://git-scm.com/about"
-    ],
+    "sourceUrls": ["https://git-scm.com/about"],
     "labeledBy": "knoldr-seed",
     "notes": "False — the source describes Git as distributed with full local history."
   },
@@ -121,9 +105,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "web",
-    "sourceUrls": [
-      "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/301"
-    ],
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/301"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -132,9 +114,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "databases",
-    "sourceUrls": [
-      "https://www.sqlite.org/serverless.html"
-    ],
+    "sourceUrls": ["https://www.sqlite.org/serverless.html"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -143,9 +123,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "web",
-    "sourceUrls": [
-      "https://www.rfc-editor.org/rfc/rfc8259"
-    ],
+    "sourceUrls": ["https://www.rfc-editor.org/rfc/rfc8259"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -154,9 +132,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "programming",
-    "sourceUrls": [
-      "https://www.rust-lang.org/"
-    ],
+    "sourceUrls": ["https://www.rust-lang.org/"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -165,9 +141,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "web",
-    "sourceUrls": [
-      "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/418"
-    ],
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/418"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -176,9 +150,7 @@
     "claimType": "factual",
     "expectedVerdict": "verified",
     "domain": "tools",
-    "sourceUrls": [
-      "https://docs.docker.com/compose/"
-    ],
+    "sourceUrls": ["https://docs.docker.com/compose/"],
     "labeledBy": "knoldr-seed"
   },
   {
@@ -187,9 +159,7 @@
     "claimType": "factual",
     "expectedVerdict": "disputed",
     "domain": "web",
-    "sourceUrls": [
-      "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/301"
-    ],
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/301"],
     "labeledBy": "knoldr-seed",
     "notes": "False — the source states 301 is a permanent redirect."
   },
@@ -199,9 +169,7 @@
     "claimType": "factual",
     "expectedVerdict": "disputed",
     "domain": "databases",
-    "sourceUrls": [
-      "https://www.sqlite.org/serverless.html"
-    ],
+    "sourceUrls": ["https://www.sqlite.org/serverless.html"],
     "labeledBy": "knoldr-seed",
     "notes": "False — the source describes SQLite as serverless."
   },
@@ -211,9 +179,7 @@
     "claimType": "factual",
     "expectedVerdict": "disputed",
     "domain": "programming",
-    "sourceUrls": [
-      "https://www.typescriptlang.org/"
-    ],
+    "sourceUrls": ["https://www.typescriptlang.org/"],
     "labeledBy": "knoldr-seed",
     "notes": "False — TypeScript compiles to plain JavaScript."
   },

@@ -7,28 +7,39 @@
 // overlapping ticks and replicas) and a uniform error boundary, leaving each
 // worker as just its cadence, name, and body.
 
-import { startFqaWorkers } from '../fqa/workers';
 import { processRetryQueue } from '../ingest/retry-runner';
 import { logger } from '../observability/logger';
 import { withClusterLock } from '../observability/worker-lock';
 
 const handles: ReturnType<typeof setInterval>[] = [];
+// In-flight tick promises, so graceful shutdown can DRAIN active work
+// instead of killing a half-committed batch (SIGTERM used to hard-exit
+// mid-verify). Bounded: one entry per worker at most (cluster lock makes
+// overlapping ticks no-ops).
+const inFlight = new Set<Promise<void>>();
+let stopping = false;
 
 /** Run `body` every `ms`, under the named cluster lock, with a uniform
  * try/catch error boundary. */
 function schedule(ms: number, name: string, body: () => Promise<void>): void {
   handles.push(
-    setInterval(
-      () =>
-        void withClusterLock(name, async () => {
-          try {
-            await body();
-          } catch (err) {
-            logger.error({ error: (err as Error).message }, `${name} failed`);
-          }
-        }),
-      ms,
-    ),
+    setInterval(() => {
+      if (stopping) {
+        return;
+      }
+      const run = withClusterLock(name, async () => {
+        try {
+          await body();
+        } catch (err) {
+          logger.error({ error: (err as Error).message }, `${name} failed`);
+        }
+      }).then(
+        () => undefined,
+        () => undefined,
+      );
+      inFlight.add(run);
+      void run.finally(() => inFlight.delete(run));
+    }, ms),
   );
 }
 
@@ -124,12 +135,6 @@ export function startWorkers(): void {
     }
   });
 
-  // Calibration worker — every 30 minutes.
-  schedule(30 * 60 * 1000, 'calibration', async () => {
-    const { calibrate } = await import('../claim/calibration');
-    await calibrate();
-  });
-
   // Drift detector — every 6 hours, batch=5.
   schedule(6 * 60 * 60 * 1000, 'drift', async () => {
     const { detectDrift } = await import('../claim/reverify');
@@ -142,24 +147,19 @@ export function startWorkers(): void {
     await runInvariantChecks();
   });
 
-  // Smoke evaluation — every hour.
-  schedule(60 * 60 * 1000, 'smoke-eval', async () => {
-    const { runSmokeEval } = await import('../claim/smoke-eval');
-    await runSmokeEval();
-  });
-
-  // FQA safety-net workers (audit-and-enrich + ttl-sweep). They keep their
-  // own internal interval registry and honor KNOLDR_FQA_WORKERS=0.
-  startFqaWorkers();
-
-  logger.info({ workers: handles.length + 2 }, 'background workers started');
+  logger.info({ workers: handles.length }, 'background workers started');
 }
 
-/** Stop the tracked interval workers on graceful shutdown. The FQA timers
- * manage their own lifecycle; the process is exiting anyway. */
-export function stopWorkers(): void {
+/** Stop scheduling and DRAIN in-flight ticks (bounded wait) so a
+ * half-finished verify/extract batch commits before the process exits. */
+export async function stopWorkers(drainTimeoutMs = 30_000): Promise<void> {
+  stopping = true;
   for (const h of handles) {
     clearInterval(h);
   }
   handles.length = 0;
+  if (inFlight.size > 0) {
+    logger.info({ active: inFlight.size }, 'draining in-flight worker ticks');
+    await Promise.race([Promise.allSettled(Array.from(inFlight)), new Promise(r => setTimeout(r, drainTimeoutMs))]);
+  }
 }

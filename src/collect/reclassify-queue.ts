@@ -24,6 +24,9 @@ export async function processReclassifyQueue(batchSize = 3): Promise<number> {
         SELECT 1 FROM entry_tag et
         WHERE et.entry_id = e.id AND et.entry_created_at = e.created_at
       )
+      -- Livelock guard: an entry whose reclassification still produced
+      -- no tags is stamped and skipped on later ticks.
+      AND e.metadata->>'reclassify_empty' IS NULL
     ORDER BY e.created_at DESC
     LIMIT ${batchSize}
   `);
@@ -94,8 +97,16 @@ export async function processReclassifyQueue(batchSize = 3): Promise<number> {
     const meta = metas[i]!;
     const createdAt = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
 
-    // Skip if classify returned defaults (tags still empty = LLM failed)
+    // Classify returned defaults (tags still empty = LLM failed or the
+    // content genuinely has none) — stamp terminal so the entry is not
+    // re-billed against the LLM every tick.
     if (meta.tags.length === 0 && meta.domain.length <= 1) {
+      await getDb().execute(sql`
+        UPDATE entry
+        SET metadata = COALESCE(metadata, '{}'::jsonb)
+                       || jsonb_build_object('reclassify_empty', NOW()::text)
+        WHERE id = ${row.id} AND created_at = ${createdAt.toISOString()}::timestamptz
+      `);
       continue;
     }
 

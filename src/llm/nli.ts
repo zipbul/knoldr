@@ -5,6 +5,7 @@ import { z } from 'zod/v4';
 import { logger } from '../observability/logger';
 import { callLlm, extractJson } from './cli';
 import { loadWithDeviceFallback } from './device';
+import { loadOnce } from './load-once';
 
 // Two NLI models, routed by claim language:
 //
@@ -46,16 +47,7 @@ const cached = new Map<string, CachedHandles>();
 const loading = new Map<string, Promise<CachedHandles>>();
 
 async function getHandles(modelId: string): Promise<CachedHandles> {
-  const hit = cached.get(modelId);
-  if (hit) {
-    return hit;
-  }
-  const inFlight = loading.get(modelId);
-  if (inFlight) {
-    return inFlight;
-  }
-
-  const promise = (async () => {
+  return loadOnce(cached, loading, modelId, async () => {
     const { AutoTokenizer, AutoModelForSequenceClassification, softmax } = await import('@huggingface/transformers');
     const tokenizer = await AutoTokenizer.from_pretrained(modelId);
     const model = await loadWithDeviceFallback(modelId, device =>
@@ -70,13 +62,9 @@ async function getHandles(modelId: string): Promise<CachedHandles> {
       softmax: softmax as unknown as (arr: Float32Array) => Float32Array,
       id2label: (model.config as unknown as { id2label: Record<number, string> }).id2label,
     };
-    cached.set(modelId, handles);
     logger.info({ model: modelId }, 'NLI model loaded');
     return handles;
-  })();
-
-  loading.set(modelId, promise);
-  return promise;
+  });
 }
 
 /**

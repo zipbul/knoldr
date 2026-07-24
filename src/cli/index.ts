@@ -8,7 +8,7 @@ import { processFeedback, RateLimitError } from '../score/feedback';
 import { search, explore } from '../search/search';
 
 const HELP = `
-knoldr — AI-native universal data platform
+knoldr — verified-fact warehouse for AI agents
 
 Usage:
   knoldr store   --raw <text> | --file <path> | --input <json-path> [--source-url <url> --source-type <type>] [--json]

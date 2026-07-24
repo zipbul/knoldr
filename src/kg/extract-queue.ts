@@ -21,7 +21,27 @@ import { storeTriples } from './store';
  * the citogenesis pattern we're trying to avoid.
  */
 const MIN_KG_CERTAINTY = Number(process.env.KNOLDR_KG_MIN_CERTAINTY ?? 0.5);
+
+// Livelock guard: claims whose extraction yielded ZERO triples were
+// re-selected (and re-billed against the LLM) every tick forever —
+// `kg_relation` rows are the only completion marker and none exist for
+// them. Claims carry no metadata column, so the skip-list is an
+// in-process bounded set: a restart retries each empty claim once,
+// which is acceptable (one LLM call), while steady-state cost is zero.
+const MAX_EMPTY_SKIP = 10_000;
+const emptyExtractionSkip = new Set<string>();
+function rememberEmpty(claimId: string): void {
+  if (emptyExtractionSkip.size >= MAX_EMPTY_SKIP) {
+    const first = emptyExtractionSkip.values().next().value;
+    if (first !== undefined) {
+      emptyExtractionSkip.delete(first);
+    }
+  }
+  emptyExtractionSkip.add(claimId);
+}
+
 export async function processKgExtractionQueue(batchSize = 3): Promise<number> {
+  const skip = Array.from(emptyExtractionSkip);
   const rows = await getDb().execute(sql`
     SELECT c.id, c.statement, c.verdict, c.certainty
     FROM claim c
@@ -31,6 +51,7 @@ export async function processKgExtractionQueue(batchSize = 3): Promise<number> {
       AND NOT EXISTS (
         SELECT 1 FROM kg_relation r WHERE r.claim_id = c.id
       )
+      AND NOT (c.id = ANY(${sql`ARRAY[${sql.join(skip.length > 0 ? skip.map(x => sql`${x}`) : [sql`''`], sql`, `)}]::text[]`}))
     ORDER BY
       CASE c.verdict WHEN 'verified' THEN 0 ELSE 1 END,
       c.certainty DESC,
@@ -53,7 +74,8 @@ export async function processKgExtractionQueue(batchSize = 3): Promise<number> {
     try {
       const triples = await extractTriples(row.statement);
       if (triples.length === 0) {
-        logger.debug({ claimId: row.id }, 'no triples extracted');
+        rememberEmpty(row.id);
+        logger.debug({ claimId: row.id }, 'no triples extracted — skipped until restart');
         continue;
       }
       // Weight = certainty discounted by verdict. Verified claims keep

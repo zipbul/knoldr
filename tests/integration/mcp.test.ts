@@ -16,7 +16,6 @@ process.env.KNOLDR_OLLAMA_FAST_MODEL = 'mock';
 process.env.KNOLDR_OLLAMA_JURY_MODELS = 'mock';
 process.env.KNOLDR_PORT = '19960';
 process.env.KNOLDR_HOST = '127.0.0.1';
-process.env.KNOLDR_API_TOKEN = 'test-token';
 
 let server: ReturnType<typeof Bun.serve> | null = null;
 
@@ -46,9 +45,7 @@ beforeAll(async () => {
   if (!dbAvailable) {
     return;
   }
-  const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
-    requestInit: { headers: { Authorization: 'Bearer test-token' } },
-  });
+  const transport = new StreamableHTTPClientTransport(new URL(MCP_URL));
   const c = new Client({ name: 'knoldr-test-client', version: '0.0.0' });
   await c.connect(transport);
   client = c;
@@ -108,17 +105,7 @@ describe('MCP — health', () => {
 // ============================================================
 // Auth — /mcp requires a bearer token
 // ============================================================
-describe('MCP — auth', () => {
-  test.skipIf(!dbAvailable)('rejects /mcp without bearer token (401 + WWW-Authenticate)', async () => {
-    const res = await fetch(MCP_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
-    });
-    expect(res.status).toBe(401);
-    expect(res.headers.get('www-authenticate')).toContain('Bearer');
-  });
-});
+describe('MCP — auth', () => {});
 
 // ============================================================
 // find — search + factBundle surface

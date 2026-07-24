@@ -1,4 +1,4 @@
-import { sql, gt, and, ne, lt } from 'drizzle-orm';
+import { sql, gt, and, ne } from 'drizzle-orm';
 import { ulid } from 'ulid';
 
 import { getDb } from '../db/connection';
@@ -69,7 +69,7 @@ export async function batchDedup(): Promise<number> {
           distance: sql<number>`${entry.embedding} <=> ${vecStr}::vector`,
         })
         .from(entry)
-        .where(and(ne(entry.id, current.id), lt(entry.authority, 2.0)))
+        .where(ne(entry.id, current.id))
         .orderBy(sql`${entry.embedding} <=> ${vecStr}::vector`)
         .limit(5);
 

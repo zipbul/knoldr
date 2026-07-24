@@ -91,8 +91,8 @@ async function ingestInner(input: StoreInput, opts: { fromRetry?: boolean }): Pr
       await enqueueRetry(input.raw, sources[0]?.url, `decompose_parse_error: ${errorMsg}`);
 
       ingestionTotal.inc({ action: IngestAction.Rejected });
-      // Keep the rejected record visible to callers (research.ts
-      // counts it, CLI prints it) — but with `entryId: null` so no
+      // Keep the rejected record visible to callers (the ingest tool
+      // and CLI report it) — but with `entryId: null` so no
       // downstream code can mistake it for a real partition-routable
       // ULID.
       return [

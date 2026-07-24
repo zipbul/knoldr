@@ -211,7 +211,7 @@ export const retryQueue = pgTable(
 // ============================================================
 // Each Entry may produce N claims; each claim is a single-fact proposition
 // classified by epistemic type (factual/subjective/predictive/normative) and,
-// for factual claims, verified by Pyreez deliberation into a verdict +
+// for factual claims, verified by the verify pipeline into a verdict +
 // certainty. Claim embeddings enable claim-level semantic retrieval and the
 // db_cross_ref verification step.
 //
@@ -467,24 +467,11 @@ export const entryScore = pgTable(
       columns: [t.entryId, t.entryCreatedAt],
       foreignColumns: [entry.id, entry.createdAt],
     }).onDelete('cascade'),
-    check('entry_score_dimension_values', sql`${t.dimension} IN ('factuality', 'novelty', 'actionability', 'signal')`),
+    check('entry_score_dimension_values', sql`${t.dimension} IN ('factuality')`),
     check('entry_score_value_range', sql`${t.value} >= 0 AND ${t.value} <= 1`),
     index('idx_entry_score_dimension').on(t.dimension, t.value),
   ],
 );
-
-// ============================================================
-// calibration_state — Auto-tuned NLI thresholds (v0.5)
-// Single-row table. Verify pipeline reads on each batch start.
-// ============================================================
-export const calibrationState = pgTable('calibration_state', {
-  id: integer('id').primaryKey().default(1),
-  nliSupportThreshold: doublePrecision('nli_support_threshold').notNull().default(0.7),
-  nliRefuteThreshold: doublePrecision('nli_refute_threshold').notNull().default(0.7),
-  sampleSize: integer('sample_size').notNull().default(0),
-  bestF1: doublePrecision('best_f1').notNull().default(0),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
 
 // ============================================================
 // golden_set_claim — Human-labelled claims for verdict regression measurement.
@@ -562,8 +549,7 @@ export const goldenSetRun = pgTable(
 // claim_feedback — Claim-level structured feedback (v0.4 design).
 // Distinct from the entry-level feedback_log which stays for
 // authority signals on Entry objects. claim_feedback drives
-// claim authority + verdict transitions via the (eventual) FQA
-// enrichment pipeline. Append-only; the claim itself is never
+// claim authority adjustments. Append-only; the claim itself is never
 // mutated by feedback.
 // ============================================================
 export const claimFeedback = pgTable(
@@ -589,18 +575,6 @@ export const claimFeedback = pgTable(
     counterNliScore: doublePrecision('counter_nli_score'),
     auditNote: text('audit_note'),
 
-    // FQA-inferred fields — populated by the feedback quality agent from
-    // audit_note free text. Kept separate from direct fields; weighted
-    // lower in evidence_strength calculation.
-    failureDimensionInferred: text('failure_dimension_inferred'),
-    partialTruthInferred: doublePrecision('partial_truth_inferred'),
-    counterSourceUrlInferred: text('counter_source_url_inferred'),
-    enrichedAt: timestamp('enriched_at', { withTimezone: true }),
-    enrichedBy: text('enriched_by'),
-    enrichmentLlmVersion: text('enrichment_llm_version'),
-    reporterResponded: integer('reporter_responded'),
-    enrichmentStatus: text('enrichment_status').notNull().default('pending'),
-
     // Computed and maintained by the feedback pipeline; combined with
     // agent_feedback_authority.feedback_authority to weight authority
     // updates on the referenced claim.
@@ -623,27 +597,14 @@ export const claimFeedback = pgTable(
       sql`${t.failureDimension} IS NULL OR ${t.failureDimension} IN ('fully-false','scope-too-broad','time-expired','modality-too-strong','context-mismatch','partially-correct')`,
     ),
     check(
-      'claim_feedback_failure_dimension_inferred_values',
-      sql`${t.failureDimensionInferred} IS NULL OR ${t.failureDimensionInferred} IN ('fully-false','scope-too-broad','time-expired','modality-too-strong','context-mismatch','partially-correct')`,
-    ),
-    check(
       'claim_feedback_partial_truth_range',
       sql`${t.partialTruth} IS NULL OR (${t.partialTruth} >= 0 AND ${t.partialTruth} <= 1)`,
-    ),
-    check(
-      'claim_feedback_partial_truth_inferred_range',
-      sql`${t.partialTruthInferred} IS NULL OR (${t.partialTruthInferred} >= 0 AND ${t.partialTruthInferred} <= 1)`,
     ),
     check(
       'claim_feedback_counter_nli_score_range',
       sql`${t.counterNliScore} IS NULL OR (${t.counterNliScore} >= 0 AND ${t.counterNliScore} <= 1)`,
     ),
     check('claim_feedback_evidence_strength_range', sql`${t.evidenceStrength} >= 0 AND ${t.evidenceStrength} <= 1`),
-    check(
-      'claim_feedback_enrichment_status_values',
-      sql`${t.enrichmentStatus} IN ('pending','finalized-inferred','awaiting-pull','enriched','expired-reporter-unavailable','skipped-backpressure','not-needed')`,
-    ),
-    check('claim_feedback_reporter_responded_values', sql`${t.reporterResponded} IS NULL OR ${t.reporterResponded} IN (0, 1)`),
     check('claim_feedback_audit_note_len', sql`${t.auditNote} IS NULL OR length(${t.auditNote}) <= 4000`),
     check('claim_feedback_counter_source_url_len', sql`${t.counterSourceUrl} IS NULL OR length(${t.counterSourceUrl}) <= 2000`),
     check(
@@ -652,34 +613,5 @@ export const claimFeedback = pgTable(
     ),
     index('idx_claim_feedback_claim').on(t.claimId, t.createdAt.desc()),
     index('idx_claim_feedback_reporter').on(t.reporterAgentId, t.createdAt.desc()),
-    index('idx_claim_feedback_enrichment_status').on(t.enrichmentStatus),
-  ],
-);
-
-// ============================================================
-// agent_feedback_authority — Per-agent trust score for the
-// claim_feedback signal. Learned: agents whose feedback is
-// confirmed by later re-verification earn weight; agents whose
-// feedback is contradicted lose it. Multiplied with evidence_strength
-// to determine how much a feedback can move claim.authority.
-// ============================================================
-export const agentFeedbackAuthority = pgTable(
-  'agent_feedback_authority',
-  {
-    agentId: text('agent_id').primaryKey(),
-    feedbackAuthority: doublePrecision('feedback_authority').notNull().default(0.5),
-    totalFeedbacks: integer('total_feedbacks').notNull().default(0),
-    correctFeedbacks: integer('correct_feedbacks').notNull().default(0),
-    incorrectFeedbacks: integer('incorrect_feedbacks').notNull().default(0),
-    lastUpdatedAt: timestamp('last_updated_at', { withTimezone: true }).notNull().defaultNow(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  t => [
-    check('agent_feedback_authority_range', sql`${t.feedbackAuthority} >= 0 AND ${t.feedbackAuthority} <= 1`),
-    check('agent_feedback_total_nonneg', sql`${t.totalFeedbacks} >= 0`),
-    check('agent_feedback_correct_nonneg', sql`${t.correctFeedbacks} >= 0`),
-    check('agent_feedback_incorrect_nonneg', sql`${t.incorrectFeedbacks} >= 0`),
-    check('agent_feedback_consistency', sql`${t.correctFeedbacks} + ${t.incorrectFeedbacks} <= ${t.totalFeedbacks}`),
-    index('idx_agent_feedback_authority').on(t.feedbackAuthority.desc()),
   ],
 );

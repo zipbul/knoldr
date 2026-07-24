@@ -360,28 +360,29 @@ describe('migrate — snake → kebab conversion', () => {
       {
         application_method: string;
         failure_dimension: string | null;
-        failure_dimension_inferred: string | null;
-        enrichment_status: string;
       }[]
     >`
-      SELECT application_method, failure_dimension, failure_dimension_inferred, enrichment_status
+      SELECT application_method, failure_dimension
       FROM claim_feedback ORDER BY id
     `;
     expect(cfRows[0]!.application_method).toBe('reasoned-over');
     expect(cfRows[0]!.failure_dimension).toBe('fully-false');
-    expect(cfRows[0]!.failure_dimension_inferred).toBe('scope-too-broad');
-    expect(cfRows[0]!.enrichment_status).toBe('finalized-inferred');
+
+    // 0003_drop_self_improvement: the FQA/enrichment columns and the
+    // self-improvement tables are gone after the full chain.
+    const droppedCols = await verify<{ column_name: string }[]>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'claim_feedback'
+        AND column_name IN ('failure_dimension_inferred','partial_truth_inferred','enrichment_status','reporter_responded')
+    `;
+    expect(droppedCols).toHaveLength(0);
+    const droppedTables = await verify<{ table_name: string }[]>`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_name IN ('agent_feedback_authority','calibration_state')
+    `;
+    expect(droppedTables).toHaveLength(0);
     expect(cfRows[1]!.failure_dimension).toBe('time-expired');
-    expect(cfRows[1]!.failure_dimension_inferred).toBe('modality-too-strong');
-    expect(cfRows[1]!.enrichment_status).toBe('awaiting-pull');
     expect(cfRows[2]!.failure_dimension).toBe('context-mismatch');
-    expect(cfRows[2]!.failure_dimension_inferred).toBe('partially-correct');
-    expect(cfRows[2]!.enrichment_status).toBe('expired-reporter-unavailable');
-    expect(cfRows[3]!.enrichment_status).toBe('skipped-backpressure');
-    expect(cfRows[4]!.enrichment_status).toBe('not-needed');
-    // `awaiting_reporter_push` collapses into `awaiting-pull` —
-    // the push channel was retired entirely.
-    expect(cfRows[5]!.enrichment_status).toBe('awaiting-pull');
 
     // Every *_values CHECK that 0001 VALIDATEs must end up enforced.
     const validated = await verify<{ conname: string; convalidated: boolean }[]>`

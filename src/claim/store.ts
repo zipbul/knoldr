@@ -16,7 +16,7 @@ interface StoredClaim {
 
 /**
  * Persist extracted claims for an entry. Factual claims are immediately
- * enqueued for Pyreez verification; subjective/predictive/normative go in
+ * enqueued for verification; subjective/predictive/normative go in
  * with verdict=not_applicable and never leave that state.
  */
 export async function storeClaims(

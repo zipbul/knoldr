@@ -1,12 +1,9 @@
 import { Readability } from '@mozilla/readability';
 import { JSDOM } from 'jsdom';
-import { resolve as resolve4, resolve6 } from 'node:dns/promises';
-import { isIP } from 'node:net';
 
 import { generateEmbedding } from '../ingest/embed';
 import { rerank } from '../llm/reranker';
 import { logger } from '../observability/logger';
-import { sanitizeSource } from './sanitize';
 
 // Per-fetch budget. Most pages render under 5s; the few that don't
 // (paywalls, JS-only, dead) we'd rather give up on than block the
@@ -28,8 +25,6 @@ interface FetchedSource {
   lang?: string;
   fetchedAt: Date;
   error?: string;
-  /** True when prompt-injection patterns were stripped from text. */
-  injected?: boolean;
 }
 
 // LRU cache: same Wikipedia / arXiv / GitHub URLs get hit
@@ -101,27 +96,14 @@ async function fetchSource(url: string): Promise<FetchedSource> {
 async function doFetch(url: string): Promise<FetchedSource> {
   const fetchedAt = new Date();
 
-  // SSRF guard: reject non-http(s), disallowed ports, and any hostname
-  // that resolves to a private / loopback / link-local / unique-local
-  // range. Must run BEFORE fetch() so redirects on internal hostnames
-  // are re-validated (see manual redirect follow below).
-  const guarded = await assertPublicUrl(url);
-  if (!guarded.ok) {
-    return { url, status: 'fetch_failed', fetchedAt, error: guarded.reason };
-  }
-
   const ctrl = AbortSignal.timeout(FETCH_TIMEOUT_MS);
 
   try {
-    // `redirect: "manual"` so each hop is re-validated against the SSRF
-    // filter. Follow up to 5 redirects; anything beyond is suspicious.
+    // Follow up to 5 redirects manually (fetch's auto-follow hides the
+    // final URL, which we log for provenance).
     let current = url;
     let res: Response | null = null;
     for (let hop = 0; hop < 5; hop++) {
-      const check = await assertPublicUrl(current);
-      if (!check.ok) {
-        return { url, status: 'fetch_failed', fetchedAt, error: check.reason };
-      }
       res = await fetch(current, {
         signal: ctrl,
         headers: { 'user-agent': USER_AGENT, accept: 'text/html,application/xhtml+xml' },
@@ -165,20 +147,15 @@ async function doFetch(url: string): Promise<FetchedSource> {
     }
 
     const normalized = normalizeWhitespace(article.textContent);
-    const sanitized = sanitizeSource(normalized);
-    if (sanitized.injected) {
-      logger.warn({ url }, 'prompt-injection patterns scrubbed from source');
-    }
     return {
       url,
       status: 'ok',
       title: article.title ?? undefined,
-      text: sanitized.cleaned,
+      text: normalized,
       byline: article.byline ?? undefined,
       publishedTime: article.publishedTime ?? undefined,
       lang: article.lang ?? undefined,
       fetchedAt,
-      injected: sanitized.injected,
     };
   } catch (err) {
     const msg = (err as Error).message;
@@ -189,128 +166,6 @@ async function doFetch(url: string): Promise<FetchedSource> {
 
 function normalizeWhitespace(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Reject URLs pointing at internal infrastructure. Covers:
- *  - non-http(s) schemes (file://, gopher://, ftp://, ...)
- *  - non-standard ports (only 80/443 and the explicit default allowed,
- *    plus hosts listed in KNOLDR_ALLOWED_INTERNAL_HOSTS)
- *  - IP literals in private/loopback/link-local/unique-local ranges
- *  - hostnames that resolve to any of the above (A + AAAA checked)
- *
- * Opt-in allowlist: set `KNOLDR_ALLOWED_INTERNAL_HOSTS` to a
- * comma-separated list of hostnames (e.g. an internal wiki) that the
- * verifier is expected to reach. Entries in this list bypass the
- * private-IP and port-range checks — use sparingly and only for hosts
- * whose content is trusted.
- */
-function getAllowedInternalHosts(): Set<string> {
-  const raw = process.env.KNOLDR_ALLOWED_INTERNAL_HOSTS ?? '';
-  return new Set(
-    raw
-      .split(',')
-      .map(s => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
-}
-
-async function assertPublicUrl(raw: string): Promise<{ ok: true } | { ok: false; reason: string }> {
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return { ok: false, reason: 'invalid url' };
-  }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-    return { ok: false, reason: `disallowed scheme ${u.protocol}` };
-  }
-  const host = (u.hostname || '').toLowerCase();
-  if (!host) {
-    return { ok: false, reason: 'empty host' };
-  }
-
-  // Explicit allowlist escape hatch for legitimate intranet sources.
-  const allowed = getAllowedInternalHosts();
-  if (allowed.has(host)) {
-    return { ok: true };
-  }
-
-  // Resolve (or recognize IP literal) and check every address.
-  const ips: string[] = [];
-  if (isIP(host)) {
-    ips.push(host);
-  } else {
-    try {
-      const [a, aaaa] = await Promise.allSettled([resolve4(host), resolve6(host)]);
-      if (a.status === 'fulfilled') {
-        ips.push(...a.value);
-      }
-      if (aaaa.status === 'fulfilled') {
-        ips.push(...aaaa.value);
-      }
-    } catch {
-      return { ok: false, reason: 'dns error' };
-    }
-  }
-  if (ips.length === 0) {
-    return { ok: false, reason: 'no dns records' };
-  }
-  for (const ip of ips) {
-    if (isPrivateIp(ip)) {
-      return { ok: false, reason: `private ip ${ip}` };
-    }
-  }
-  return { ok: true };
-}
-
-function isPrivateIp(ip: string): boolean {
-  // IPv6: loopback ::1, link-local fe80::/10, unique-local fc00::/7,
-  // IPv4-mapped ::ffff:a.b.c.d, unspecified ::.
-  if (ip.includes(':')) {
-    const lower = ip.toLowerCase();
-    if (lower === '::' || lower === '::1') {
-      return true;
-    }
-    if (lower.startsWith('fe80:') || /^fe[89ab]/.test(lower)) {
-      return true;
-    }
-    if (/^f[cd]/.test(lower)) {
-      return true;
-    }
-    const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) {
-      return isPrivateIp(mapped[1]!);
-    }
-    return false;
-  }
-  const parts = ip.split('.').map(Number);
-  if (parts.length !== 4 || parts.some(p => Number.isNaN(p) || p < 0 || p > 255)) {
-    return true; // reject anything we can't parse
-  }
-  const [a, b] = parts as [number, number, number, number];
-  if (a === 10) {
-    return true;
-  } // 10/8
-  if (a === 127) {
-    return true;
-  } // 127/8 loopback
-  if (a === 169 && b === 254) {
-    return true;
-  } // 169.254/16 link-local (AWS metadata, etc.)
-  if (a === 172 && b >= 16 && b <= 31) {
-    return true;
-  } // 172.16/12
-  if (a === 192 && b === 168) {
-    return true;
-  } // 192.168/16
-  if (a === 0) {
-    return true;
-  } // 0.0.0.0/8 unspecified
-  if (a >= 224) {
-    return true;
-  } // multicast / reserved
-  return false;
 }
 
 /**

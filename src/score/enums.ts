@@ -117,18 +117,8 @@ export enum FailureDimension {
   PartiallyCorrect = 'partially-correct',
 }
 
-export enum EnrichmentStatus {
-  Pending = 'pending',
-  FinalizedInferred = 'finalized-inferred',
-  AwaitingPull = 'awaiting-pull',
-  Enriched = 'enriched',
-  ExpiredReporterUnavailable = 'expired-reporter-unavailable',
-  SkippedBackpressure = 'skipped-backpressure',
-  NotNeeded = 'not-needed',
-}
-
 // ============================================================
-// entry-level feedback (legacy v0.3)
+// entry-level feedback
 // ============================================================
 
 export enum Signal {
@@ -185,9 +175,6 @@ export enum IngestAction {
 
 export enum EntryScoreDimension {
   Factuality = 'factuality',
-  Novelty = 'novelty',
-  Actionability = 'actionability',
-  Signal = 'signal',
 }
 
 // ============================================================

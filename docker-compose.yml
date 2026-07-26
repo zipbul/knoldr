@@ -26,18 +26,12 @@ services:
       KNOLDR_PORT: '5100'
       KNOLDR_HOST: '0.0.0.0'
       KNOLDR_LOG_LEVEL: '${KNOLDR_LOG_LEVEL:-info}'
-      # Fail-closed auth: the container binds 0.0.0.0 (reachable), so the
-      # MCP /mcp endpoint REQUIRES a bearer token. With NODE_ENV=production
-      # (and the host-aware rule in src/mcp/auth.ts) a blank token makes the
-      # app refuse to start rather than serve unauthenticated. Set it in .env.
       NODE_ENV: '${NODE_ENV:-production}'
-      KNOLDR_API_TOKEN: '${KNOLDR_API_TOKEN:-}'
       # Local Ollama on the host. host.docker.internal maps to the
       # WSL host gateway via extra_hosts below — Linux Docker doesn't
       # resolve it automatically the way Docker Desktop does.
       OLLAMA_HOST: '${OLLAMA_HOST:-http://host.docker.internal:11434}'
       KNOLDR_OLLAMA_FAST_MODEL: '${KNOLDR_OLLAMA_FAST_MODEL:-gemma4:e4b}'
-      KNOLDR_OLLAMA_JURY_MODELS: '${KNOLDR_OLLAMA_JURY_MODELS:-gemma4:e4b,qwen2.5:14b}'
       KNOLDR_OLLAMA_TIMEOUT_MS: '${KNOLDR_OLLAMA_TIMEOUT_MS:-120000}'
       # Cap onnxruntime per-op threads to prevent NLI / reranker /
       # embedding model forwards from saturating every core. We set
@@ -61,10 +55,6 @@ services:
     restart: unless-stopped
     # GPU inference: NLI / reranker / QA / embedding model forwards
     # run on CUDA via transformers.js' onnxruntime-node backend.
-    # Shares the host GPU with the finetune sidecar — both containers
-    # can run concurrently because inference only holds the GPU for
-    # the duration of each forward pass and finetune is a rare (once
-    # weekly) workload.
     deploy:
       resources:
         reservations:
@@ -92,48 +82,6 @@ services:
       retries: 5
     profiles:
       - test
-
-  # Fine-tune sidecar — OPT-IN ONLY (`docker compose --profile finetune up`).
-  # Off by default: its benefit is unmeasured until the golden-set eval
-  # accumulates enough labelled data to show the knoldr-judge adapter
-  # actually beats the base model, and it monopolizes the GPU weekly in
-  # the meantime. Re-enable once eval:golden demonstrates a win.
-  # When enabled: wakes every KNOLDR_FT_INTERVAL_HOURS, LoRA-trains
-  # Gemma 4 E4B on accumulated pseudo-gold, exports GGUF, registers
-  # knoldr-judge:vYYYYMMDD-HHMM (Ollama auto-reloads after).
-  finetune:
-    profiles:
-      - finetune
-    build:
-      context: ./finetune
-    environment:
-      DATABASE_URL: postgres://knoldr:knoldr@db:5432/knoldr
-      OLLAMA_HOST: 'http://host.docker.internal:11434'
-      KNOLDR_FT_GGUF_OUT: '/ollama-models/knoldr'
-      KNOLDR_FT_INTERVAL_HOURS: '${KNOLDR_FT_INTERVAL_HOURS:-24}'
-      KNOLDR_FT_MIN_SAMPLES: '${KNOLDR_FT_MIN_SAMPLES:-200}'
-      KNOLDR_FT_FORCE_NOW: '${KNOLDR_FT_FORCE_NOW:-0}'
-      # Disable torch.compile / inductor JIT. unsloth invokes triton
-      # codegen for fused kernels which then asks gcc to compile a
-      # cuda_utils.c shim against libcuda.so.1; the link succeeds in
-      # isolation but fails inside the inductor pipeline (cause
-      # unclear, likely sysconfig-deps mismatch in the WSL CUDA stack).
-      # LoRA training at max_steps=600 doesn't need fused kernels — we
-      # accept the unsloth slowdown to keep the chain unblocked.
-      TORCHDYNAMO_DISABLE: '1'
-      TORCH_COMPILE_DISABLE: '1'
-    extra_hosts:
-      - 'host.docker.internal:host-gateway'
-    volumes:
-      - /home/revil/.ollama/models:/ollama-models
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
 volumes:
   knoldr-data:

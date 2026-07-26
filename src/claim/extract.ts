@@ -123,7 +123,7 @@ const GLOBAL_MAX_CLAIMS = 80;
 //        - entailment >= MIN_ENTAILMENT (positively supports)
 //        - entailment > contradiction   (doesn't refute harder)
 //
-// MIN_ENTAILMENT defaults to 0.5; calibration worker can override.
+// MIN_ENTAILMENT defaults to 0.5; override via KNOLDR_EXTRACT_NLI_THRESHOLD.
 const MIN_ENTAILMENT_DEFAULT = 0.5;
 const GATE_DISABLED = process.env.KNOLDR_EXTRACT_NLI_GATE === 'off';
 
@@ -274,27 +274,12 @@ async function extractClaims(title: string, content: string): Promise<ExtractedC
 }
 
 /**
- * Resolve the NLI entailment threshold for the source-entailment gate.
- *
- * Precedence:
- *   1. KNOLDR_EXTRACT_NLI_THRESHOLD env var (operator pin)
- *   2. calibration_state.nli_support_threshold (auto-tuned by the
- *      calibration worker once the golden set is populated)
- *   3. MIN_ENTAILMENT_DEFAULT (0.5)
- *
- * Cached per minute so we don't hammer the DB on every extracted
- * claim. The same cache TTL is used by getCurrentThresholds() in
- * calibration.ts for the verify pipeline.
+ * NLI entailment threshold for the source-entailment gate:
+ * KNOLDR_EXTRACT_NLI_THRESHOLD env pin, else 0.5. (Auto-calibration
+ * was removed — it tuned the threshold against the pipeline's own
+ * verdicts, a circular signal. Re-tune manually from golden-set F1.)
  */
-let cachedThreshold: { value: number; expiresAt: number } | null = null;
-const THRESHOLD_TTL_MS = 60_000;
-// Short DB read budget — calibration is a single-row SELECT; if it
-// can't return in 500ms (DB unreachable, env without DATABASE_URL,
-// unit test isolation) we just use the default. Never blocks the
-// extraction pipeline on a slow DB.
-const THRESHOLD_DB_TIMEOUT_MS = 500;
-
-async function getExtractGateThreshold(): Promise<number> {
+function getExtractGateThreshold(): number {
   const env = process.env.KNOLDR_EXTRACT_NLI_THRESHOLD;
   if (env !== undefined && env !== '') {
     const n = Number(env);
@@ -302,33 +287,7 @@ async function getExtractGateThreshold(): Promise<number> {
       return n;
     }
   }
-  const now = Date.now();
-  if (cachedThreshold && cachedThreshold.expiresAt > now) {
-    return cachedThreshold.value;
-  }
-  try {
-    const { getCurrentThresholds } = await import('./calibration');
-    const value = await Promise.race<number>([
-      (async () => {
-        const t = await getCurrentThresholds();
-        return t.support ?? MIN_ENTAILMENT_DEFAULT;
-      })(),
-      new Promise<number>((_, reject) =>
-        setTimeout(() => reject(new Error('calibration read timed out')), THRESHOLD_DB_TIMEOUT_MS),
-      ),
-    ]);
-    cachedThreshold = { value, expiresAt: now + THRESHOLD_TTL_MS };
-    return value;
-  } catch {
-    // Cache the default too so subsequent calls within the TTL
-    // window don't retry the timeout. Without this every claim in
-    // the same gate batch eats the 500ms penalty.
-    cachedThreshold = {
-      value: MIN_ENTAILMENT_DEFAULT,
-      expiresAt: now + THRESHOLD_TTL_MS,
-    };
-    return MIN_ENTAILMENT_DEFAULT;
-  }
+  return MIN_ENTAILMENT_DEFAULT;
 }
 
 /**
@@ -348,7 +307,7 @@ async function gateBySourceEntailment(claims: ExtractedClaim[]): Promise<Extract
   let droppedEntailmentLow = 0;
   let droppedContradiction = 0;
   let nliErrors = 0;
-  const threshold = await getExtractGateThreshold();
+  const threshold = getExtractGateThreshold();
 
   for (const c of claims) {
     if (!c.quote || c.quote.trim().length === 0) {

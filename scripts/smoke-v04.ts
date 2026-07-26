@@ -1,11 +1,10 @@
-// v0.4 라이브 smoke — 외부 LLM 없이 데이터 경로만 검증.
+// v0.4 live smoke — exercises the data paths without any external LLM.
 //
 // Verifies:
 //   1. v0.4 schema applied (new columns + tables present)
-//   2. claim_feedback insert → claim.authority EMA delta visible
+//   2. claim_feedback insert → claim.authority delta visible
 //   3. claim_relation edge write via relation-writer
 //   4. fetchFactBundlesForEntries returns the inserted graph context
-//   5. authority-learn EMA on a faked verdict transition
 //
 // Run with:
 //   DATABASE_URL=postgres://knoldr:knoldr@localhost:5436/knoldr_test \
@@ -14,11 +13,10 @@
 import { eq, sql } from 'drizzle-orm';
 import { ulid } from 'ulid';
 
-import { recordVerdictTransition } from '../src/claim/authority-learn';
 import { fetchFactBundlesForEntries } from '../src/claim/query';
 import { writeClaimEdges } from '../src/claim/relation-writer';
 import { getDb } from '../src/db/connection';
-import { entry, claim, claimRelation, claimFeedback, agentFeedbackAuthority } from '../src/db/schema';
+import { entry, claim, claimRelation, claimFeedback } from '../src/db/schema';
 import { handleClaimFeedback } from '../src/mcp/handlers/claim-feedback';
 import { ApplicationMethod, ClaimType, EntryStatus, FailureDimension, Outcome, RelationType, Verdict } from '../src/score/enums';
 
@@ -178,24 +176,7 @@ async function main(): Promise<void> {
     throw new Error('update mode failed');
   }
 
-  // 7. authority-learn EMA on a verdict transition
-  const learnResult = await recordVerdictTransition(claimAId, Verdict.Verified, Verdict.Disputed);
-  console.log('[7] authority-learn:', JSON.stringify(learnResult));
-  const repRow = await getDb()
-    .select({
-      fa: agentFeedbackAuthority.feedbackAuthority,
-      total: agentFeedbackAuthority.totalFeedbacks,
-      correct: agentFeedbackAuthority.correctFeedbacks,
-    })
-    .from(agentFeedbackAuthority)
-    .where(eq(agentFeedbackAuthority.agentId, 'smoke-agent'))
-    .limit(1);
-  console.log('    reporter authority row:', JSON.stringify(repRow[0]));
-  if (!repRow[0] || repRow[0].correct !== 1) {
-    throw new Error('verdict transition should have credited reporter');
-  }
-
-  // 8. Reject feedbackId/claimId mismatch
+  // 7. Reject feedbackId/claimId mismatch
   const mismatchResult = await handleClaimFeedback(
     {
       feedbackId: fbResult.feedbackId,

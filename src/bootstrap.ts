@@ -26,11 +26,13 @@ function installShutdown(httpServer: ReturnType<typeof startMcpServer>): void {
     }
     shuttingDown = true;
     logger.info({ signal }, 'shutting down');
-    stopWorkers();
-    void httpServer.stop(true);
-    // Active withClusterLock callbacks release their advisory lock in their
-    // own finally{}, so no lock leaks on exit.
-    process.exit(0);
+    void (async () => {
+      // Drain in-flight worker ticks (bounded) so half-finished batches
+      // commit; advisory locks release in their own finally{}.
+      await stopWorkers();
+      void httpServer.stop(true);
+      process.exit(0);
+    })();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));

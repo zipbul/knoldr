@@ -8,22 +8,20 @@
 // five distortion categories established in the design.
 //
 // This pass records only. Authority / verdict state changes flow
-// through the FQA enrichment pipeline (next milestone), at which
-// point evidence_strength × agent_feedback_authority will weight
-// claim certainty adjustments.
 
 import { eq, sql } from 'drizzle-orm';
 import { ulid } from 'ulid';
 import { z } from 'zod';
 
 import { getDb } from '../../db/connection';
-import { claim, claimFeedback, agentFeedbackAuthority } from '../../db/schema';
-import { enqueueEnrichment } from '../../fqa/queue';
+import { claim, claimFeedback } from '../../db/schema';
 import { logger } from '../../observability/logger';
-import { ApplicationMethod, EnrichmentStatus, FailureDimension, Outcome } from '../../score/enums';
+import { ApplicationMethod, FailureDimension, Outcome } from '../../score/enums';
 import { computeFeedbackEvidenceStrength } from '../../score/feedback-strength';
 
 const claimFeedbackInputShape = {
+  // Self-declared caller id for attribution (trusted ecosystem; no auth).
+  agentId: z.string().min(1).max(100).optional(),
   // When set, the call updates an existing row instead of inserting
   // a new one. Used by reporters that learned more after their
   // initial submission. The row's reporter_agent_id must match.
@@ -62,13 +60,11 @@ type ClaimFeedbackResult =
       feedbackId: string;
       claimId: string;
       evidenceStrength: number;
-      reporterFeedbackAuthority: number;
-      enrichmentStatus: string;
       updated: boolean;
     }
   | {
       ok: false;
-      error: 'invalid_input' | 'claim_not_found' | 'feedback_not_found' | 'reporter_mismatch';
+      error: 'invalid_input' | 'claim_not_found' | 'feedback_not_found' | 'reporter_mismatch' | 'rate_limited';
       message: string;
       missingRequired?: string[];
     };
@@ -87,23 +83,6 @@ function computeEvidenceStrength(input: ClaimFeedbackInput): number {
     contextScope: input.contextScope ?? null,
     partialTruth: input.partialTruth ?? null,
   });
-}
-
-/**
- * Initial enrichment_status decision. The FQA worker will transition
- * pending → enriched / awaiting_pull / etc. asynchronously. We set
- * the *initial* state here so the queue knows what work to pick up.
- */
-function initialEnrichmentStatus(input: ClaimFeedbackInput, strength: number): EnrichmentStatus {
-  // Held outcomes carry no enrichment value — no failure to investigate.
-  if (input.outcome === Outcome.Held) {
-    return EnrichmentStatus.NotNeeded;
-  }
-  // Already strong enough that FQA wouldn't ask for more.
-  if (strength >= 0.8) {
-    return EnrichmentStatus.NotNeeded;
-  }
-  return EnrichmentStatus.Pending;
 }
 
 async function handleClaimFeedback(input: Record<string, unknown>, callerAgentId: string): Promise<ClaimFeedbackResult> {
@@ -158,36 +137,31 @@ async function handleClaimFeedback(input: Record<string, unknown>, callerAgentId
   }
 
   const evidenceStrength = computeEvidenceStrength(validated);
-  const enrichmentStatus = initialEnrichmentStatus(validated, evidenceStrength);
 
   const feedbackId = ulid();
 
-  // All three mutations (feedback row, reporter counter, claim
-  // authority) happen inside one transaction. Without this, an
-  // insert failure after the upsert leaves totalFeedbacks bumped
-  // for a row that never existed, slowly corrupting the counter.
-  await getDb().transaction(async tx => {
-    // Reporter's authority row — first-contact gets default 0.5;
-    // existing rows have totalFeedbacks bumped. correct/incorrect
-    // move only when later re-verification confirms or refutes.
-    await tx
-      .insert(agentFeedbackAuthority)
-      .values({
-        agentId: callerAgentId,
-        feedbackAuthority: 0.5,
-        totalFeedbacks: 1,
-      })
-      .onConflictDoUpdate({
-        target: agentFeedbackAuthority.agentId,
-        set: {
-          totalFeedbacks: sql`${agentFeedbackAuthority.totalFeedbacks} + 1`,
-          lastUpdatedAt: new Date(),
-        },
-      });
+  // Rate limits mirror entry-level feedback (score/feedback.ts): they
+  // guard the authority EMA against runaway agent loops, not attackers.
+  // 1 insert per agent+claim per hour; 10 inserts per claim per hour.
+  const [limits] = (await getDb().execute(sql`
+    SELECT
+      count(*) FILTER (WHERE reporter_agent_id = ${callerAgentId})::int AS by_agent,
+      count(*)::int AS by_claim
+    FROM claim_feedback
+    WHERE claim_id = ${validated.claimId}
+      AND created_at > NOW() - INTERVAL '1 hour'
+  `)) as unknown as Array<{ by_agent: number; by_claim: number }>;
+  if ((limits?.by_agent ?? 0) >= 1) {
+    return { ok: false, error: 'rate_limited', message: 'same agent+claim feedback limited to 1 per hour' };
+  }
+  if ((limits?.by_claim ?? 0) >= 10) {
+    return { ok: false, error: 'rate_limited', message: 'claim feedback limited to 10 per hour' };
+  }
 
-    // Insert the feedback row BEFORE adjusting claim.authority so a
-    // FK or CHECK failure doesn't move authority for a row that
-    // never persisted.
+  // Both mutations (feedback row, claim authority) happen inside one
+  // transaction so a failure can't move authority for a row that
+  // never persisted.
+  await getDb().transaction(async tx => {
     await tx.insert(claimFeedback).values({
       id: feedbackId,
       claimId: validated.claimId,
@@ -204,29 +178,11 @@ async function handleClaimFeedback(input: Record<string, unknown>, callerAgentId
       counterClaimText: validated.counterClaimText ?? null,
       counterNliScore: validated.counterNliScore ?? null,
       auditNote: validated.auditNote ?? null,
-      enrichmentStatus,
       evidenceStrength,
     });
 
-    await adjustClaimAuthorityTx(tx, validated.claimId, callerAgentId, evidenceStrength, validated.outcome);
+    await adjustClaimAuthorityTx(tx, validated.claimId, evidenceStrength, validated.outcome);
   });
-
-  // Fire-and-forget immediate enrichment: only when the row actually
-  // entered 'pending' state (i.e., it's not 'not_needed' from held
-  // outcome or already-strong evidence). The handler's response
-  // doesn't wait — the agent gets its 100ms ack immediately and the
-  // in-process worker drains enrichment in the background.
-  if (enrichmentStatus === EnrichmentStatus.Pending) {
-    enqueueEnrichment(feedbackId);
-  }
-
-  // Fetch the reporter's current authority for the response so the
-  // caller can see how their feedback will be weighted.
-  const [authorityRow] = await getDb()
-    .select({ fa: agentFeedbackAuthority.feedbackAuthority })
-    .from(agentFeedbackAuthority)
-    .where(eq(agentFeedbackAuthority.agentId, callerAgentId))
-    .limit(1);
 
   logger.info(
     {
@@ -235,7 +191,6 @@ async function handleClaimFeedback(input: Record<string, unknown>, callerAgentId
       reporter: callerAgentId,
       outcome: validated.outcome,
       evidenceStrength,
-      enrichmentStatus,
     },
     'claim_feedback recorded',
   );
@@ -245,8 +200,6 @@ async function handleClaimFeedback(input: Record<string, unknown>, callerAgentId
     feedbackId,
     claimId: validated.claimId,
     evidenceStrength,
-    reporterFeedbackAuthority: authorityRow?.fa ?? 0.5,
-    enrichmentStatus,
     updated: false,
   };
 }
@@ -264,9 +217,6 @@ async function updateExistingFeedback(input: ClaimFeedbackInput, callerAgentId: 
       counterSourceUrl: claimFeedback.counterSourceUrl,
       counterClaimText: claimFeedback.counterClaimText,
       counterNliScore: claimFeedback.counterNliScore,
-      counterSourceUrlInferred: claimFeedback.counterSourceUrlInferred,
-      failureDimensionInferred: claimFeedback.failureDimensionInferred,
-      partialTruthInferred: claimFeedback.partialTruthInferred,
       contextDomain: claimFeedback.contextDomain,
       contextScope: claimFeedback.contextScope,
     })
@@ -314,28 +264,15 @@ async function updateExistingFeedback(input: ClaimFeedbackInput, callerAgentId: 
     counterNliScore: row.counterNliScore ?? input.counterNliScore ?? null,
   };
 
-  // Recompute strength using direct (merged) + inferred (already on row).
+  // Recompute strength from the merged direct fields.
   const newStrength = computeFeedbackEvidenceStrength({
     counterSourceUrl: merged.counterSourceUrl,
-    counterSourceUrlInferred: row.counterSourceUrlInferred,
     counterNliScore: merged.counterNliScore,
     failureDimension: merged.failureDimension,
-    failureDimensionInferred: row.failureDimensionInferred,
     contextDomain: row.contextDomain,
     contextScope: row.contextScope && typeof row.contextScope === 'object' ? (row.contextScope as Record<string, unknown>) : null,
     partialTruth: merged.partialTruth,
-    partialTruthInferred: row.partialTruthInferred,
   });
-
-  // Status transition: held-equivalent or strong enough → final;
-  // otherwise stay pending for the background worker to revisit.
-  // Uses the stored outcome, not the input — see effectiveOutcome.
-  const newStatus =
-    effectiveOutcome === Outcome.Held
-      ? EnrichmentStatus.NotNeeded
-      : newStrength >= 0.8
-        ? EnrichmentStatus.Enriched
-        : EnrichmentStatus.Pending;
 
   // Both writes inside one transaction: feedback row update and
   // claim authority adjustment commit together or not at all.
@@ -352,22 +289,14 @@ async function updateExistingFeedback(input: ClaimFeedbackInput, callerAgentId: 
         counterSourceUrl: merged.counterSourceUrl,
         counterClaimText: merged.counterClaimText,
         counterNliScore: merged.counterNliScore,
-        reporterResponded: 1,
         evidenceStrength: newStrength,
-        enrichmentStatus: newStatus,
       })
       .where(eq(claimFeedback.id, row.id));
 
     if (strengthDelta !== 0) {
-      await adjustClaimAuthorityTx(tx, row.claimId, callerAgentId, strengthDelta, effectiveOutcome);
+      await adjustClaimAuthorityTx(tx, row.claimId, strengthDelta, effectiveOutcome);
     }
   });
-
-  const [authorityRow] = await getDb()
-    .select({ fa: agentFeedbackAuthority.feedbackAuthority })
-    .from(agentFeedbackAuthority)
-    .where(eq(agentFeedbackAuthority.agentId, callerAgentId))
-    .limit(1);
 
   logger.info(
     {
@@ -375,7 +304,6 @@ async function updateExistingFeedback(input: ClaimFeedbackInput, callerAgentId: 
       claimId: input.claimId,
       reporter: callerAgentId,
       newStrength,
-      newStatus,
     },
     'claim_feedback updated by reporter',
   );
@@ -385,19 +313,16 @@ async function updateExistingFeedback(input: ClaimFeedbackInput, callerAgentId: 
     feedbackId: row.id,
     claimId: input.claimId,
     evidenceStrength: newStrength,
-    reporterFeedbackAuthority: authorityRow?.fa ?? 0.5,
-    enrichmentStatus: newStatus,
     updated: true,
   };
 }
 
 /**
  * Move `claim.authority` based on a fresh feedback row. Held →
- * gentle bump up; failed/partial → gentle bump down. Magnitude
- * is bounded by evidence_strength × reporter feedback_authority
- * × LEARNING_RATE so a single noisy signal can't whiplash the
- * score. Clamped to [0,1] at the SQL level so concurrent updates
- * stay safe.
+ * gentle bump up; failed/partial → gentle bump down. Magnitude is
+ * bounded by evidence_strength × LEARNING_RATE so a single noisy
+ * signal can't whiplash the score. Clamped to [0,1] at the SQL
+ * level so concurrent updates stay safe.
  */
 const FEEDBACK_LEARNING_RATE = 0.05;
 
@@ -411,7 +336,6 @@ type AuthorityExecutor = any;
 async function adjustClaimAuthorityTx(
   executor: AuthorityExecutor,
   claimId: string,
-  reporterAgentId: string,
   strengthDelta: number,
   outcome: Outcome,
 ): Promise<void> {
@@ -419,15 +343,8 @@ async function adjustClaimAuthorityTx(
     return;
   }
 
-  const [authRow] = await executor
-    .select({ fa: agentFeedbackAuthority.feedbackAuthority })
-    .from(agentFeedbackAuthority)
-    .where(eq(agentFeedbackAuthority.agentId, reporterAgentId))
-    .limit(1);
-  const reporterAuthority = authRow?.fa ?? 0.5;
-
   const sign = outcome === Outcome.Held ? 1 : -1;
-  const delta = sign * strengthDelta * reporterAuthority * FEEDBACK_LEARNING_RATE;
+  const delta = sign * strengthDelta * FEEDBACK_LEARNING_RATE;
   if (delta === 0) {
     return;
   }

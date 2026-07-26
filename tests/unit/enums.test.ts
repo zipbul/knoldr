@@ -3,7 +3,6 @@ import { describe, test, expect } from 'bun:test';
 import {
   ApplicationMethod,
   ClaimType,
-  EnrichmentStatus,
   EntryScoreDimension,
   EntryStatus,
   EvidenceSource,
@@ -40,7 +39,6 @@ const allEnums = {
   ApplicationMethod,
   Outcome,
   FailureDimension,
-  EnrichmentStatus,
   Signal,
   FeedbackReason,
   EntryStatus,

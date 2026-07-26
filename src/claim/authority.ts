@@ -41,7 +41,7 @@ const RULES: AuthorityRule[] = [
   { match: h => /(^|\.)substack\.com$/.test(h), score: 0.35 },
 
   // Tier 5: social / forums
-  { match: h => /(^|\.)reddit\.com$/.test(h) || /(^|\.)hackernews\.com$/.test(h), score: 0.25 },
+  { match: h => /(^|\.)reddit\.com$/.test(h) || /(^|\.)news\.ycombinator\.com$/.test(h), score: 0.25 },
   { match: h => /(^|\.)twitter\.com$/.test(h) || /(^|\.)x\.com$/.test(h), score: 0.2 },
   { match: h => /(^|\.)facebook\.com$/.test(h) || /(^|\.)instagram\.com$/.test(h), score: 0.15 },
 ];

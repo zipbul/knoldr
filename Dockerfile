@@ -13,6 +13,10 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
 COPY src/ src/
+# drizzle/ ships the SQL migrations docker-entrypoint.sh applies at
+# boot (src/db/migrate.ts reads ./drizzle) — without it the container
+# crash-loops on first start.
+COPY drizzle/ drizzle/
 COPY tsconfig.json ./
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

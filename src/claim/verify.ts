@@ -4,7 +4,6 @@ import { ulid } from 'ulid';
 import { getDb } from '../db/connection';
 import { claim, verifyQueue, entry, entryScore, entrySource } from '../db/schema';
 import { checkKgContradiction, type KgContradiction } from '../kg/contradiction';
-import { expandWithKgFacts } from '../kg/expand';
 import { bespokeCheck } from '../llm/bespoke-check';
 import { qaVerify } from '../llm/docqa';
 import { nliScore, nliScoreLocal, type NliScores } from '../llm/nli';
@@ -13,16 +12,11 @@ import { verifyVerdicts, verifyErrors, verifyStageLatency } from '../observabili
 import { ClaimType, EntryScoreDimension, EvidenceSource, RelationType, Verdict, VerdictTrigger } from '../score/enums';
 import { aggregate, type SourceEvidence } from './aggregator';
 import { authorityFor } from './authority';
-import { recordVerdictTransitionSafe } from './authority-learn';
-import { getCurrentThresholds } from './calibration';
 import { decomposeClaim } from './cove';
 import { fingerprint, type SourceFingerprint } from './independence';
 import { hasNegation, NEGATION_DAMPING } from './negation';
-// Verify pipeline now uses independence grouping via an internal
-// union-find (`assignIndependenceGroups` below); the `independentCount`
-// helper is no longer called directly. Keep the import path documented
-// in the accompanying comment in case a future sweep wants to surface
-// the raw count via metrics.
+// Independence grouping runs via the internal union-find
+// (`assignIndependenceGroups` below) over source fingerprints.
 import { numericContradicts } from './numeric';
 import { writeClaimEdges } from './relation-writer';
 import { fetchSource, selectRelevantChunks, type FetchedSource } from './source-fetch';
@@ -58,7 +52,6 @@ interface VerifyResult {
     sourceChecks?: SourceCheckResult[];
     kgConflict?: KgContradiction;
     subClaims?: SubClaimResult[];
-    votes?: Array<{ cli: string; verdict: Verdict; certainty: number }>;
     // claim_relation edge targets discovered during verify, SCORED:
     // cross-ref edges carry the classifying NLI probability, KG-conflict
     // edges carry kgConflict.confidence. The queue committer writes
@@ -75,12 +68,12 @@ interface ScoredEdgeTarget {
 }
 
 const SIMILARITY_THRESHOLD = 0.8;
+// Fixed NLI decision thresholds (FEVER-conventional 0.7). The
+// auto-calibration worker that used to tune these was removed — it
+// scored thresholds against the pipeline's own verdicts (circular).
+// Re-tune manually once golden-set F1 provides a real signal.
+const NLI_THRESHOLDS = { support: 0.7, refute: 0.7 } as const;
 
-// NLI thresholds. Default 0.7 (conventional FEVER cutoff) but the
-// auto-calibration worker overrides these in `calibration_state`
-// based on observed agreement between source_check + KG signals.
-// `getCurrentThresholds()` is cached per minute so the cost is one
-// DB read per verify batch.
 const SOURCE_CHECK_MAX_URLS = 5;
 
 /**
@@ -149,15 +142,19 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
     if (candidates.length === 0) {
       return r;
     }
-    const thresholds = await getCurrentThresholds();
+    // KG-wins applies ACROSS lists too: a neighbor the KG stage already
+    // marked contradicting must never also receive a cross-ref SUPPORTS
+    // edge, even if pairwise NLI entails it (content-precise KG beats
+    // the similarity+NLI heuristic).
+    const kgContradictingIds = new Set((r.evidence.contradicting ?? []).map(t => t.id));
     const corroborating: ScoredEdgeTarget[] = [];
     const contradicting: ScoredEdgeTarget[] = [];
     for (const cand of candidates) {
       try {
         const s = await nliScoreLocal(cand.statement, row.statement);
-        if (s.contradiction >= thresholds.refute) {
+        if (s.contradiction >= NLI_THRESHOLDS.refute) {
           contradicting.push({ id: cand.id, score: s.contradiction });
-        } else if (s.entailment >= thresholds.support) {
+        } else if (s.entailment >= NLI_THRESHOLDS.support && !kgContradictingIds.has(cand.id)) {
           corroborating.push({ id: cand.id, score: s.entailment });
         }
       } catch (err) {
@@ -200,10 +197,10 @@ async function verifyClaimInner(claimId: string): Promise<VerifyResult | null> {
   if (kgConflict && kgConflict.confidence >= 0.7) {
     // Flatten every supporting claim id across all conflicting
     // objects into CONTRADICTS targets, scored with the conflict
-    // confidence. Cap at 10 per claim so a popular subject doesn't
-    // write a hundred edges per detection.
+    // confidence. Cap at 8 — the same MAX_CONTRADICT_EDGES the merge
+    // enforces, so KG's own targets are never silently trimmed later.
     const contradicting = Array.from(new Set(kgConflict.conflictingObjects.flatMap(co => co.claimIds)))
-      .slice(0, 10)
+      .slice(0, 8)
       .map(id => ({ id, score: kgConflict.confidence }));
     return await withCrossRef({
       verdict: Verdict.Disputed,
@@ -348,25 +345,12 @@ async function runSourceCheck(statement: string, urls: string[]): Promise<Verify
   const evidences: EvidenceWithFingerprint[] = [];
 
   const claimYear = extractClaimYear(statement);
-  // Prefix every NLI premise with verified KG facts about the
-  // claim's entities. When the chunk text only partially mentions
-  // the subject this gives the model the rest of the known graph
-  // as direct context. Cost: one LLM triple-extraction call per
-  // verify (already done by checkKgContradiction upstream — could
-  // be memoized if it becomes a hot path).
-  const kgPrefix = await expandWithKgFacts(statement);
   for (const url of urls) {
     const fetched = await fetchSource(url);
-    // Halve authority when the source tried prompt injection — a
-    // page that attempted to manipulate the verifier is structurally
-    // less trustworthy on the underlying topic too. Doesn't reject
-    // outright (the surrounding factual content might still be
-    // useful) but the Bayesian aggregator will discount it heavily.
-    const baseAuthority = authorityFor(url);
     const check: SourceCheckResult = {
       url,
       status: fetched.status,
-      authority: fetched.injected ? baseAuthority * 0.5 : baseAuthority,
+      authority: authorityFor(url),
       publishedTime: fetched.publishedTime,
     };
     // Skip sources that predate the claim's referenced year. They
@@ -388,7 +372,11 @@ async function runSourceCheck(statement: string, urls: string[]): Promise<Verify
       let bestText = '';
       let numericOverride = false;
       for (const c of chunks) {
-        const premise = kgPrefix ? `${kgPrefix}${c}` : c;
+        // STRICT GROUNDING: the verdict premise is the fetched source
+        // text ALONE. Prefixing internal KG facts here once let an
+        // irrelevant-but-fetchable citation verify a claim because the
+        // KG prefix entailed it (see docs/no-search-restructure-plan.md).
+        const premise = c;
         const s = await nliScore(premise, statement);
         // Numeric override: when the claim asserts e.g. "770M" but
         // this chunk says "7B" for the same entity, the chunk is
@@ -418,7 +406,7 @@ async function runSourceCheck(statement: string, urls: string[]): Promise<Verify
       evidences.push({
         scores: bestChunk,
         authority: check.authority ?? 0.5,
-        group: -1, // assigned by independentCount-backed clustering below
+        group: -1, // assigned by assignIndependenceGroups below
         fingerprint: fp,
       });
     }
@@ -441,8 +429,8 @@ async function runSourceCheck(statement: string, urls: string[]): Promise<Verify
 
   // Negation damping. NLI flips unreliably on negated claims, so we
   // damp the aggregated certainty before threshold checks; a
-  // borderline negated claim should fall through to CoVe / web
-  // search rather than commit on weak signal.
+  // borderline negated claim should fall through to CoVe over the
+  // cited sources rather than commit on weak signal.
   let damped = agg.certainty;
   if (hasNegation(statement)) {
     damped *= NEGATION_DAMPING;
@@ -500,14 +488,13 @@ async function runSourceCheck(statement: string, urls: string[]): Promise<Verify
     }
   }
 
-  const thresholds = await getCurrentThresholds();
-  // Honor calibrated thresholds when they're stricter than the
-  // posterior cutoffs baked into the aggregator. Calibration drives
-  // the verdict floor; aggregator decides direction + magnitude.
-  if (agg.verdict === Verdict.Verified && damped < thresholds.support) {
+  // Threshold floor on top of the aggregator's posterior cutoffs:
+  // the aggregator decides direction + magnitude, this gate enforces
+  // the minimum decisiveness.
+  if (agg.verdict === Verdict.Verified && damped < NLI_THRESHOLDS.support) {
     return null;
   }
-  if (agg.verdict === Verdict.Disputed && damped < thresholds.refute) {
+  if (agg.verdict === Verdict.Disputed && damped < NLI_THRESHOLDS.refute) {
     return null;
   }
   if (agg.verdict === Verdict.Unverified) {
@@ -650,52 +637,15 @@ async function dbCrossRef(
 // via Promise.allSettled so throughput is unaffected.
 let verifyRunning = false;
 
-// Postgres advisory-lock key shared with finetune/run.py. Finetune
-// holds an EXCLUSIVE lock on this key for the duration of a training
-// cycle (model load → train → GGUF export → Ollama register, ~30-60
-// minutes). Verify acquires it as a SHARED lock — many verify ticks
-// can hold it simultaneously, but none can run while finetune holds
-// the exclusive variant. This keeps verify from issuing Ollama calls
-// while finetune is unloading models / writing GGUF.
-//
-// Hex layout matches finetune/run.py FT_LOCK_KEY: 0x6B6E6F6C64720001.
-const FT_LOCK_KEY = BigInt('0x6B6E6F6C64720001');
-
-async function tryAcquireSharedFtLock(): Promise<boolean> {
-  const r = (await getDb().execute(sql`
-    SELECT pg_try_advisory_lock_shared(${sql.raw(FT_LOCK_KEY.toString())}::bigint) AS got
-  `)) as unknown as Array<{ got: boolean }>;
-  return r[0]?.got === true;
-}
-async function releaseSharedFtLock(): Promise<void> {
-  await getDb().execute(sql`
-    SELECT pg_advisory_unlock_shared(${sql.raw(FT_LOCK_KEY.toString())}::bigint)
-  `);
-}
-
 /** Process up to `batchSize` claims from the verify queue. */
 async function processVerifyQueue(batchSize = 5): Promise<number> {
   if (verifyRunning) {
     return 0;
   }
   verifyRunning = true;
-  // Block-aware: if finetune holds the exclusive lock we skip this tick
-  // entirely instead of letting Ollama calls fail one-by-one against an
-  // unloaded model. The next tick (60 s later) re-tries.
-  const gotLock = await tryAcquireSharedFtLock();
-  if (!gotLock) {
-    verifyRunning = false;
-    logger.info('verify cycle skipped: finetune cycle in progress');
-    return 0;
-  }
   try {
     return await processVerifyQueueInner(batchSize);
   } finally {
-    try {
-      await releaseSharedFtLock();
-    } catch (err) {
-      logger.warn({ error: (err as Error).message }, 'failed to release ft-shared lock');
-    }
     verifyRunning = false;
   }
 }
@@ -754,14 +704,7 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
           evidence: { source: EvidenceSource.ExhaustedPipeline, rationale: 'all verification paths returned null' },
         };
       }
-      let oldVerdict: string | null = null;
       await getDb().transaction(async tx => {
-        // Capture the pre-update verdict so we can fire the
-        // agent_feedback_authority learner only on actual
-        // transitions. SELECT inside the tx keeps the snapshot
-        // consistent with the UPDATE that follows.
-        const [prior] = await tx.select({ verdict: claim.verdict }).from(claim).where(eq(claim.id, item.claimId)).limit(1);
-        oldVerdict = prior?.verdict ?? null;
         await tx
           .update(claim)
           .set({
@@ -793,12 +736,6 @@ async function processVerifyQueueInner(batchSize: number): Promise<number> {
         source: result!.evidence.source,
         verdict: result!.verdict,
       });
-      // Fire-and-forget authority learning. Failures here can't
-      // touch the verdict commit above (already done), and the
-      // function swallows its own errors.
-      if (oldVerdict && oldVerdict !== result!.verdict) {
-        recordVerdictTransitionSafe(item.claimId, oldVerdict as Verdict, result!.verdict as Verdict);
-      }
       // claim_relation edge writes — outside the verdict tx so a
       // failed edge insert (FK miss, dup) can't roll back the
       // verdict commit. writeClaimEdges is ON CONFLICT DO NOTHING

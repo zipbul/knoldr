@@ -100,18 +100,24 @@ export async function handleNeighbors(input: Record<string, unknown>): Promise<N
   const typeFilter = validated.relationType ? sql`AND relation_type = ${validated.relationType}` : sql``;
 
   const rows = (await getDb().execute(sql`
-    WITH RECURSIVE walk(eid, dist, rels) AS (
-      SELECT ${root.id}::text AS eid, 0 AS dist, ARRAY[]::text[] AS rels
+    WITH RECURSIVE walk(eid, dist, rels, path) AS (
+      SELECT ${root.id}::text AS eid, 0 AS dist, ARRAY[]::text[] AS rels,
+             ARRAY[${root.id}::text] AS path
       UNION ALL
       SELECT
         CASE WHEN r.source_entity_id = w.eid THEN r.target_entity_id ELSE r.source_entity_id END,
         w.dist + 1,
-        w.rels || r.relation_type
+        w.rels || r.relation_type,
+        w.path || CASE WHEN r.source_entity_id = w.eid THEN r.target_entity_id ELSE r.source_entity_id END
       FROM walk w
       JOIN kg_relation r
         ON (r.source_entity_id = w.eid OR r.target_entity_id = w.eid)
        ${typeFilter}
       WHERE w.dist < ${validated.hops}
+        -- Visited guard: without it, mutual edges (A↔B) re-expand each
+        -- other every hop — row counts explode as degree^hops and the
+        -- root returns as its own neighbor.
+        AND NOT (CASE WHEN r.source_entity_id = w.eid THEN r.target_entity_id ELSE r.source_entity_id END) = ANY(w.path)
     )
     -- GROUP BY already dedupes by entity; DISTINCT ON was forcing
     -- ORDER BY to lead with e.id which made LIMIT pick neighbors

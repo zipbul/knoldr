@@ -2,6 +2,7 @@ import type { PreTrainedModel, PreTrainedTokenizer } from '@huggingface/transfor
 
 import { logger } from '../observability/logger';
 import { loadWithDeviceFallback } from './device';
+import { loadOnce } from './load-once';
 
 // Cross-encoder reranker. Embedding-based cosine ranking is fast but
 // it scores each chunk independently — same chunk gets the same
@@ -22,17 +23,11 @@ interface CachedReranker {
   model: PreTrainedModel;
 }
 
-let cached: CachedReranker | null = null;
-let loading: Promise<CachedReranker> | null = null;
+const cached = new Map<string, CachedReranker>();
+const loading = new Map<string, Promise<CachedReranker>>();
 
 async function getHandles(): Promise<CachedReranker> {
-  if (cached) {
-    return cached;
-  }
-  if (loading) {
-    return loading;
-  }
-  loading = (async () => {
+  return loadOnce(cached, loading, RERANKER_MODEL, async () => {
     const { AutoTokenizer, AutoModelForSequenceClassification } = await import('@huggingface/transformers');
     const tokenizer = await AutoTokenizer.from_pretrained(RERANKER_MODEL);
     const model = await loadWithDeviceFallback(RERANKER_MODEL, device =>
@@ -41,11 +36,9 @@ async function getHandles(): Promise<CachedReranker> {
         device,
       } as unknown as Record<string, unknown>),
     );
-    cached = { tokenizer, model };
     logger.info({ model: RERANKER_MODEL }, 'reranker model loaded');
-    return cached;
-  })();
-  return loading;
+    return { tokenizer, model };
+  });
 }
 
 /**

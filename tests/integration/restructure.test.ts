@@ -27,7 +27,9 @@ process.env.KNOLDR_OLLAMA_FAST_MODEL = 'mock';
 
 // Mock the NLI module BEFORE claim/verify is imported: edge classification
 // must never load ONNX models (or call Ollama) in tests. Statement markers
-// steer the canned scores.
+// steer the canned scores. `nliScore` (the translate-fallback-capable
+// variant) THROWS: edge classification is contractually LOCAL-ONLY, so a
+// regression that routes edges through nliScore fails loudly here.
 void mock.module('../../src/llm/nli', () => {
   const score = (premise: string) => {
     if (premise.includes('SUPPORT_ME')) {
@@ -39,10 +41,28 @@ void mock.module('../../src/llm/nli', () => {
     return { entailment: 0.2, neutral: 0.6, contradiction: 0.2 };
   };
   return {
-    nliScore: async (premise: string) => score(premise),
+    nliScore: async () => {
+      throw new Error('nliScore must not be called for edge classification (local-only contract)');
+    },
     nliScoreLocal: async (premise: string) => score(premise),
   };
 });
+
+// Mock the KG contradiction check: statements containing KG_CONFLICT get a
+// canned functional conflict pointing at test-settable claim ids.
+let kgConflictClaimIds: string[] = [];
+void mock.module('../../src/kg/contradiction', () => ({
+  checkKgContradiction: async (statement: string) => {
+    if (!statement.includes('KG_CONFLICT') || kgConflictClaimIds.length === 0) {
+      return null;
+    }
+    return {
+      newTriple: { subject: 'test-subject', subjectType: 'tech', predicate: 'runs_on', object: 'A', objectType: 'tech' },
+      confidence: 0.85,
+      conflictingObjects: [{ objectName: 'B', objectType: 'tech', supportingClaims: 1, claimIds: kgConflictClaimIds }],
+    };
+  },
+}));
 
 const dbAvailable = await (async () => {
   try {
@@ -246,4 +266,86 @@ describe('restructure — NLI-classified edges, weights, directions, no contagio
       [b.claimId, 0.7],
     ]);
   });
+});
+
+describe('restructure — audit regressions', () => {
+  test.skipIf(!dbAvailable)('reciprocal SUPPORTS edges: both bundles keep their supporter', async () => {
+    await cleanTestDb();
+    const a = await seedEntryWithClaim('Reciprocal supports claim A.', { verdict: 'verified' });
+    const b = await seedEntryWithClaim('Reciprocal supports claim B.', { verdict: 'verified' });
+    const { writeClaimEdges } = await import('../../src/claim/relation-writer');
+    // A→B and B→A both exist (reachable via outdated-requeue re-verification).
+    expect(await writeClaimEdges(b.claimId, [{ id: a.claimId, weight: 0.8 }], 'supports', { direction: 'incoming' })).toBe(1);
+    expect(await writeClaimEdges(a.claimId, [{ id: b.claimId, weight: 0.7 }], 'supports', { direction: 'incoming' })).toBe(1);
+
+    const { fetchFactBundlesForEntries } = await import('../../src/claim/query');
+    const bundles = await fetchFactBundlesForEntries(
+      [
+        { id: a.entryId, createdAt: a.createdAt.toISOString() },
+        { id: b.entryId, createdAt: b.createdAt.toISOString() },
+      ],
+      { maxPerEntry: 5 },
+    );
+    const bundleA = bundles.find(x => x.id === a.claimId);
+    const bundleB = bundles.find(x => x.id === b.claimId);
+    // Pre-fix, the pivot's own outgoing row consumed the direction-blind
+    // dedupe key and shadowed the genuine incoming supporter.
+    expect(bundleA?.supports.map(l => l.claimId)).toEqual([b.claimId]);
+    expect(bundleB?.supports.map(l => l.claimId)).toEqual([a.claimId]);
+  });
+
+  test.skipIf(!dbAvailable)(
+    'KG conflict: Disputed verdict, KG-scored edge, and NO cross-ref SUPPORTS for the same neighbor',
+    async () => {
+      await cleanTestDb();
+      // Neighbor that the KG marks conflicting AND pairwise NLI would entail.
+      const neighbor = await seedEntryWithClaim('SUPPORT_ME neighbor that KG contradicts.', { verdict: 'verified' });
+      kgConflictClaimIds = [neighbor.claimId];
+      try {
+        const pivot = await seedEntryWithClaim('KG_CONFLICT pivot claim.');
+        const { verifyClaim } = await import('../../src/claim/verify');
+        const result = await verifyClaim(pivot.claimId);
+        expect(result).not.toBeNull();
+        expect(result!.verdict).toBe(Verdict.Disputed);
+        expect(result!.certainty).toBeCloseTo(0.85, 5);
+        // KG-wins across lists: the neighbor appears ONLY as contradicting
+        // (with the KG confidence), never also as corroborating.
+        expect(result!.evidence.contradicting?.map(t => [t.id, t.score])).toEqual([[neighbor.claimId, 0.85]]);
+        expect((result!.evidence.corroborating ?? []).map(t => t.id)).not.toContain(neighbor.claimId);
+      } finally {
+        kgConflictClaimIds = [];
+      }
+    },
+  );
+
+  test.skipIf(!dbAvailable)(
+    'ExhaustedPipeline finalize commits WITHOUT cross-ref edges',
+    async () => {
+      await cleanTestDb();
+      // Decided neighbor that WOULD classify as a supporter…
+      await seedEntryWithClaim('SUPPORT_ME neighbor for the exhausted case.', { verdict: 'verified' });
+      // …but the pivot has a cited source that cannot be fetched (SSRF guard
+      // blocks loopback), so every attempt returns null; at attempts=2 the
+      // committer finalizes ExhaustedPipeline — with no edge writes.
+      const pivot = await seedEntryWithClaim('Cited but unfetchable pivot claim.', { sourceUrl: 'http://127.0.0.1:9/x' });
+      const { getDb } = await import('../../src/db/connection');
+      const { sql } = await import('drizzle-orm');
+      await getDb().execute(sql`
+      INSERT INTO verify_queue (claim_id, priority, attempts, next_attempt_at, queued_at)
+      VALUES (${pivot.claimId}, 50, 2, NOW(), NOW())
+    `);
+      const { processVerifyQueue } = await import('../../src/claim/verify');
+      expect(await processVerifyQueue(1)).toBe(1);
+
+      const rows = (await getDb().execute(sql`
+      SELECT c.verdict, c.evidence->>'source' AS src,
+             (SELECT count(*)::int FROM claim_relation) AS edges
+      FROM claim c WHERE c.id = ${pivot.claimId}
+    `)) as unknown as Array<{ verdict: string; src: string; edges: number }>;
+      expect(rows[0]!.verdict).toBe(Verdict.Unverified);
+      expect(rows[0]!.src).toBe(EvidenceSource.ExhaustedPipeline);
+      expect(rows[0]!.edges).toBe(0);
+    },
+    20000,
+  );
 });

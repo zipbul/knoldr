@@ -1,10 +1,10 @@
 import { sql, eq, and, lt, or } from 'drizzle-orm';
+import { ulid } from 'ulid';
 
 import { getDb } from '../db/connection';
 import { claim } from '../db/schema';
 import { logger } from '../observability/logger';
-import { Verdict } from '../score/enums';
-import { recordVerdictTransitionSafe } from './authority-learn';
+import { Verdict, VerdictTrigger } from '../score/enums';
 import { verifyClaim } from './verify';
 
 // Drift detector. A claim verified with confidence today can become
@@ -113,13 +113,23 @@ export async function detectDrift(batchSize = REVERIFY_BATCH): Promise<number> {
           lastDriftCheckAt: nowTs,
         })
         .where(eq(claim.id, c.id));
+      // Audit trail: the queue committer logs every verdict it writes;
+      // drift-driven rewrites must not be the one silent path (a legacy
+      // sourceless-claim demotion wave would otherwise leave no record).
+      await getDb().execute(sql`
+        INSERT INTO verdict_log (id, claim_id, verdict, certainty, evidence_source, grounder_model, trigger, created_at)
+        VALUES (
+          ${ulid()},
+          ${c.id},
+          ${fresh.verdict},
+          ${newCertainty},
+          ${fresh.evidence.source},
+          ${process.env.KNOLDR_OLLAMA_FAST_MODEL ?? 'gemma4:e4b'},
+          ${VerdictTrigger.Drift},
+          NOW()
+        )
+      `);
       drifted++;
-      // Drift is the highest-signal verdict transition for feedback
-      // learning — by definition the world (or the model) moved
-      // since the original verdict. Fire the same authority hook
-      // the live verify pipeline uses so reporters who anticipated
-      // this drift get credit and those who got it wrong lose it.
-      recordVerdictTransitionSafe(c.id, c.verdict as Verdict, fresh.verdict);
       logger.info(
         {
           claimId: c.id,

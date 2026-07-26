@@ -3,6 +3,7 @@ import { z } from 'zod/v4';
 import { logger } from '../observability/logger';
 import { callLlm, extractJson } from './cli';
 import { loadWithDeviceFallback } from './device';
+import { loadOnce } from './load-once';
 
 // Question-Answering verifier (DocQA).
 //
@@ -20,28 +21,22 @@ import { loadWithDeviceFallback } from './device';
 
 const QA_MODEL = process.env.KNOLDR_QA_MODEL ?? 'Xenova/distilbert-base-cased-distilled-squad';
 
-let qaPipeline: ((question: string, context: string) => Promise<{ answer: string; score: number }>) | null = null;
-let loadingQa: Promise<typeof qaPipeline> | null = null;
+type QaPipeline = (question: string, context: string) => Promise<{ answer: string; score: number }>;
+const qaCache = new Map<string, QaPipeline>();
+const qaLoading = new Map<string, Promise<QaPipeline>>();
 
-async function getQaPipeline() {
-  if (qaPipeline) {
-    return qaPipeline;
-  }
-  if (loadingQa) {
-    return loadingQa;
-  }
-  loadingQa = (async () => {
+async function getQaPipeline(): Promise<QaPipeline> {
+  return loadOnce(qaCache, qaLoading, QA_MODEL, async () => {
     const { pipeline } = await import('@huggingface/transformers');
-    qaPipeline = (await loadWithDeviceFallback(QA_MODEL, device =>
+    const qa = (await loadWithDeviceFallback(QA_MODEL, device =>
       pipeline('question-answering', QA_MODEL, {
         dtype: 'q8',
         device,
       } as unknown as Record<string, unknown>),
-    )) as unknown as typeof qaPipeline;
+    )) as unknown as QaPipeline;
     logger.info({ model: QA_MODEL }, 'QA model loaded');
-    return qaPipeline;
-  })();
-  return loadingQa;
+    return qa;
+  });
 }
 
 const questionSchema = z.object({ question: z.string().min(1).max(300), expected: z.string().min(1).max(200) });

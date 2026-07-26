@@ -298,11 +298,16 @@ async function fetchFactBundlesForEntries(
     if (!tgt) {
       continue;
     }
+    // Dedupe collapses the mutual-pair duplicate (A→B and B→A both
+    // surfacing for the same pivot, intended for contradicts) — but the
+    // key must be recorded ONLY when a link is actually bucketed:
+    // recording it on a skipped row (outgoing SUPPORTS is discarded
+    // below) would shadow the genuine incoming row that maps to the
+    // same direction-blind key and silently lose a supporter.
     const dedupeKey = `${e.pivot}|${e.other}|${e.type}`;
     if (dedupeSeen.has(dedupeKey)) {
       continue;
     }
-    dedupeSeen.add(dedupeKey);
     let b = bucketsByClaim.get(e.pivot);
     if (!b) {
       b = emptyBuckets();
@@ -322,26 +327,31 @@ async function fetchFactBundlesForEntries(
         // would invert the meaning (and double-list the edge).
         if (e.direction === 'in' && b.supports.length < maxEdges) {
           b.supports.push(link);
+          dedupeSeen.add(dedupeKey);
         }
         break;
       case RelationType.Contradicts:
         if (b.contradicts.length < maxEdges) {
           b.contradicts.push(link);
+          dedupeSeen.add(dedupeKey);
         }
         break;
       case RelationType.DerivesFrom:
         if (b.derivesFrom.length < maxEdges) {
           b.derivesFrom.push(link);
+          dedupeSeen.add(dedupeKey);
         }
         break;
       case RelationType.SupersededBy:
         if (b.supersededBy.length < maxEdges) {
           b.supersededBy.push(link);
+          dedupeSeen.add(dedupeKey);
         }
         break;
       case RelationType.Refines:
         if (b.refines.length < maxEdges) {
           b.refines.push(link);
+          dedupeSeen.add(dedupeKey);
         }
         break;
       default:

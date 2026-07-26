@@ -7,6 +7,8 @@ import { processFeedback, RateLimitError } from '../../score/feedback';
 import { routeFeedbackAction } from '../../score/feedback-router';
 
 const feedbackInputShape = {
+  // Self-declared caller id for attribution (trusted ecosystem; no auth).
+  agentId: z.string().min(1).max(100).optional(),
   entryId: z.string().min(1).max(200),
   signal: z.enum(Signal),
   reason: z.enum(FeedbackReason).optional(),

@@ -52,7 +52,7 @@ async function decompose(rawText: string): Promise<DecomposeResponse> {
   // output containing instruction-like phrases that would otherwise
   // become part of the SYSTEM prompt on retry.
   try {
-    const hint = sanitizeErrorHint(firstError!.message);
+    const hint = trimErrorHint(firstError!.message);
     const system = `${SYSTEM_PROMPT}\n\nRetry note: previous attempt failed (${hint}). Fix the output format; respond with JSON only.`;
     const output = await callLlm({ system, user: rawText });
     return validateDecomposeResponse(extractJson(output));
@@ -62,11 +62,8 @@ async function decompose(rawText: string): Promise<DecomposeResponse> {
   }
 }
 
-function sanitizeErrorHint(msg: string): string {
-  return msg
-    .slice(0, 120)
-    .replace(/ignore|disregard|system\s*:|assistant\s*:|instruction/gi, '[REDACTED]')
-    .replace(/[`<>{}]/g, ' ');
+function trimErrorHint(msg: string): string {
+  return msg.slice(0, 120).replace(/[`<>{}]/g, ' ');
 }
 
 /**

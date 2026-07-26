@@ -62,13 +62,17 @@ export async function handleProvenance(input: Record<string, unknown>): Promise<
   // frontier; depth is bounded by maxDepth. We surface the minimum
   // depth at which each ancestor first appears.
   const rows = (await getDb().execute(sql`
-    WITH RECURSIVE walk(cid, depth) AS (
-      SELECT ${validated.claimId}::text AS cid, 0 AS depth
+    WITH RECURSIVE walk(cid, depth, path) AS (
+      SELECT ${validated.claimId}::text AS cid, 0 AS depth,
+             ARRAY[${validated.claimId}::text] AS path
       UNION ALL
-      SELECT cr.target_claim_id, w.depth + 1
+      SELECT cr.target_claim_id, w.depth + 1, w.path || cr.target_claim_id
       FROM walk w
       JOIN claim_relation cr ON cr.source_claim_id = w.cid AND cr.relation_type = ${RelationType.DerivesFrom}
       WHERE w.depth < ${validated.maxDepth}
+        -- Visited guard: derives-from cycles (data errors) would
+        -- otherwise loop until maxDepth with duplicated ancestors.
+        AND NOT cr.target_claim_id = ANY(w.path)
     )
     SELECT
       c.id AS claim_id,

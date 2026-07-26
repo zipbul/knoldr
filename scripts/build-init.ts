@@ -138,9 +138,6 @@ END $$;
 `;
   out += legacyCleanup;
 
-  // Single-row calibration_state seed.
-  out += '\n--> statement-breakpoint\nINSERT INTO "calibration_state" ("id") VALUES (1) ON CONFLICT ("id") DO NOTHING;';
-
   // Header. (Fresh installs land every enum CHECK via the inline
   // `CONSTRAINT ... CHECK (...)` drizzle-kit emits at CREATE TABLE.
   // Legacy installs skip the CREATE TABLE entirely and have no

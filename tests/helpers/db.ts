@@ -53,7 +53,7 @@ export async function cleanTestDb() {
   // tests have data in them.
   await sql`TRUNCATE
     feedback_log, ingest_log, entry_source, entry_tag, entry_domain,
-    kg_relation, entity, agent_feedback_authority, claim_feedback,
+    kg_relation, entity, claim_feedback,
     claim_relation, verdict_log, verify_queue, entry_score, claim,
     retry_queue, entry, golden_set_run, golden_set_claim
     RESTART IDENTITY CASCADE`;

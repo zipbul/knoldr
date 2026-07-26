@@ -22,6 +22,10 @@ export async function processClaimExtractionQueue(batchSize = 3): Promise<number
         SELECT 1 FROM claim c
         WHERE c.entry_id = e.id AND c.entry_created_at = e.created_at
       )
+      -- Livelock guard: entries whose extraction produced ZERO claims are
+      -- stamped and skipped — without this they were re-selected (and
+      -- re-billed against the LLM) every 60s tick forever.
+      AND e.metadata->>'claim_extract_empty' IS NULL
     ORDER BY e.created_at DESC
     LIMIT ${batchSize}
   `);
@@ -45,7 +49,16 @@ export async function processClaimExtractionQueue(batchSize = 3): Promise<number
     try {
       const extracted = await extractClaims(row.title, row.content);
       if (extracted.length === 0) {
-        logger.debug({ entryId: row.id }, 'claim extraction returned empty');
+        // Terminal empty marker (see the selection guard above). A later
+        // re-ingest creates a NEW entry, so stamping is permanent-safe.
+        await getDb().execute(sql`
+          UPDATE entry
+          SET metadata = COALESCE(metadata, '{}'::jsonb)
+                         || jsonb_build_object('claim_extract_empty', NOW()::text)
+          WHERE id = ${row.id} AND created_at = ${createdAt.toISOString()}::timestamptz
+        `);
+        logger.debug({ entryId: row.id }, 'claim extraction returned empty — stamped terminal');
+        processed++;
         continue;
       }
       const priority = await priorityForEntry(row.id, createdAt);

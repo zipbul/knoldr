@@ -1,9 +1,0 @@
-{
-  "monitors": [
-    {
-      "name": "knoldr-backend",
-      "command": "cd ${CLAUDE_PLUGIN_ROOT} && docker compose logs -f --tail=40 app",
-      "description": "Live Knoldr app logs: worker ticks (verify/claim-extract/kg/...), FQA drains, health."
-    }
-  ]
-}

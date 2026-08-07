@@ -98,5 +98,105 @@
     "expectedVerdict": "not-applicable",
     "domain": "practices",
     "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "http-301-permanent",
+    "statement": "The HTTP 301 status code indicates that the requested resource has been permanently moved to a new URL.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "web",
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/301"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "sqlite-serverless",
+    "statement": "SQLite is a serverless database engine that reads and writes directly to ordinary disk files.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "databases",
+    "sourceUrls": ["https://www.sqlite.org/serverless.html"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "json-rfc8259",
+    "statement": "JSON is a lightweight, text-based data interchange format specified in RFC 8259.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "web",
+    "sourceUrls": ["https://www.rfc-editor.org/rfc/rfc8259"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "rust-no-gc",
+    "statement": "Rust guarantees memory safety without using a garbage collector.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "programming",
+    "sourceUrls": ["https://www.rust-lang.org/"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "http-teapot",
+    "statement": "The HTTP 418 status code means the server refuses to brew coffee because it is a teapot.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "web",
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/418"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "docker-compose-yaml",
+    "statement": "Docker Compose uses a YAML file to configure an application's services.",
+    "claimType": "factual",
+    "expectedVerdict": "verified",
+    "domain": "tools",
+    "sourceUrls": ["https://docs.docker.com/compose/"],
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "http-301-temporary-false",
+    "statement": "The HTTP 301 status code indicates a temporary redirect that clients must not cache.",
+    "claimType": "factual",
+    "expectedVerdict": "disputed",
+    "domain": "web",
+    "sourceUrls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/301"],
+    "labeledBy": "knoldr-seed",
+    "notes": "False — the source states 301 is a permanent redirect."
+  },
+  {
+    "id": "sqlite-clientserver-false",
+    "statement": "SQLite is a client-server database engine that requires a separate running server process.",
+    "claimType": "factual",
+    "expectedVerdict": "disputed",
+    "domain": "databases",
+    "sourceUrls": ["https://www.sqlite.org/serverless.html"],
+    "labeledBy": "knoldr-seed",
+    "notes": "False — the source describes SQLite as serverless."
+  },
+  {
+    "id": "ts-bytecode-false",
+    "statement": "TypeScript compiles to a proprietary bytecode that browsers execute directly.",
+    "claimType": "factual",
+    "expectedVerdict": "disputed",
+    "domain": "programming",
+    "sourceUrls": ["https://www.typescriptlang.org/"],
+    "labeledBy": "knoldr-seed",
+    "notes": "False — TypeScript compiles to plain JavaScript."
+  },
+  {
+    "id": "vim-best-editor",
+    "statement": "Vim is the most productive text editor for programmers.",
+    "claimType": "subjective",
+    "expectedVerdict": "not-applicable",
+    "domain": "tools",
+    "labeledBy": "knoldr-seed"
+  },
+  {
+    "id": "agi-2030-predictive",
+    "statement": "Artificial general intelligence will be achieved before 2030.",
+    "claimType": "predictive",
+    "expectedVerdict": "not-applicable",
+    "domain": "ai",
+    "labeledBy": "knoldr-seed"
   }
 ]
